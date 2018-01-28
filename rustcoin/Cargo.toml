@@ -1,0 +1,8 @@
+[package]
+name = "rustcoin"
+version = "0.1.0"
+authors = ["maxmcd <max.t.mcdonnell@gmail.com>"]
+
+[dependencies]
+rust-crypto = "0.2.36"
+time = "0.1.39"

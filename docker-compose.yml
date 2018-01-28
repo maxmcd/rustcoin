@@ -1,0 +1,14 @@
+version: '3'
+volumes:
+  chaindata:
+    external: true
+
+services:
+  python:
+    build: ./python
+    volumes:
+      - ./python:/opt/python
+      - chaindata:/opt/chaindata
+    ports:
+      - "5000:5000"
+    restart: on-failure

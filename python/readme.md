@@ -1,0 +1,1 @@
+Some code to get familiar with bitcoin concepts. Mostly copied from: https://bigishdata.com/2017/10/17/write-your-own-blockchain-part-1-creating-storing-syncing-displaying-mining-and-proving-work/
