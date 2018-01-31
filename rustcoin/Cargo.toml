@@ -9,3 +9,4 @@ time = "0.1.39"
 secp256k1 = {version = "0.8", features = ["rand"]}
 rand = "0.3"
 rust-base58 = "0.0.4"
+bigint = "4.2.0"
