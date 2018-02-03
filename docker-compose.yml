@@ -2,6 +2,8 @@ version: '3'
 volumes:
   chaindata:
     external: true
+  # persisted_node:
+  #   external: true
 
 services:
   python:
@@ -12,3 +14,10 @@ services:
     ports:
       - "5000:5000"
     restart: on-failure
+  rustcoin:
+    build: ./rustcoin
+    volumes: 
+      - ./rustcoin:/opt/rustcoin
+      - blockdata:/root/.rustcoin/blockdata
+    ports:
+      - "8333:8333"
