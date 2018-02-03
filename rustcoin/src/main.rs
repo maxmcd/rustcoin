@@ -18,34 +18,30 @@ use secp256k1::Message;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
-    let block = genesis_block();
-    let hash = block.hash();
-    println!("{:?}", hash);
-
-    difficulty_calculations();
+    let _block = mine_genesis_block();
 }
 
 struct Transactions {
-    amount: u32,
+    amount: u64,
     transactions: Vec<Transaction>,
 }
 
 struct Transaction {
-    signature: [u8; 72],
+    signature: [u8; 64],
     source: [u8; 25], // source is "coinbase" for coinbase transaction
     destination: [u8; 25],
     pk: [u8; 33],
-    amount: u32,
+    amount: u64,
     nonce_overflow: u32,
 }
 
 struct Block {
+    version: [u8; 2],
     index: u32,
-    hash: [u8; 32],
     prev_hash: [u8; 32],
     transactions: Transactions,
     nonce: u32,
-    timestamp: u32,
+    timestamp: u64,
     merkle_root: [u8; 32],
 }
 
@@ -53,6 +49,15 @@ struct Address {
     sk: [u8; 32],
     pk: [u8; 33],
     address: [u8; 25],
+}
+
+fn coinbase() -> [u8; 25] {
+    // let coinbasehex = 0x636f696e62617365
+    let mut out = [0; 25];
+    out[..8].clone_from_slice(
+        &[0x63, 0x6f, 0x69, 0x6e, 0x62, 0x61, 0x73, 0x65][..],
+    );
+    out
 }
 
 impl Address {
@@ -85,18 +90,28 @@ impl Address {
         }
     }
 
-    fn serialize(&self) -> [u8; (32+33+25)]{
-        let mut out = [0; (32+33+25)];
+    fn serialize(&self) -> [u8; (32 + 33 + 25)] {
+        let mut out = [0; (32 + 33 + 25)];
         out[..32].clone_from_slice(&self.sk[..]);
-        out[32..(32+33)].clone_from_slice(&self.pk[..]);
-        out[(32+33)..(32+33+25)].clone_from_slice(&self.address[..]);
+        out[32..(32 + 33)].clone_from_slice(&self.pk[..]);
+        out[(32 + 33)..(32 + 33 + 25)].clone_from_slice(&self.address[..]);
         out
     }
 
-    fn create_transaction(&self, amount: u32, destination: [u8; 25]) -> Transaction {
-        let mut transaction = Transaction{
-            signature: [0; 72],
-            source: self.address,
+    fn create_transaction(
+        &self,
+        amount: u64,
+        destination: [u8; 25],
+        is_coinbase: bool,
+    ) -> Transaction {
+        let source = if is_coinbase {
+            coinbase()
+        } else {
+            self.address
+        };
+        let mut transaction = Transaction {
+            signature: [0; 64],
+            source: source,
             destination: destination,
             pk: self.pk,
             amount: amount,
@@ -109,15 +124,22 @@ impl Address {
 
 impl Block {
     // let length = (3*4) + (32);
-    fn bytes_to_hash(&self) -> [u8; 44] {
+    fn bytes_to_hash(&self) -> [u8; (2 + 4 + 32 + 4 + 8 + 32 + 8)] {
         let index_u8a = transform_u32_to_array_of_u8(self.index);
         let nonce_u8a = transform_u32_to_array_of_u8(self.nonce);
-        let timestamp_u8a = transform_u32_to_array_of_u8(self.timestamp);
-        let mut out = [0; 44];
-        out[..4].clone_from_slice(&index_u8a);
-        out[4..8].clone_from_slice(&nonce_u8a);
-        out[8..12].clone_from_slice(&timestamp_u8a);
-        out[12..44].clone_from_slice(&self.prev_hash);
+        let timestamp_u8a = transform_u64_to_array_of_u8(self.timestamp);
+        let amount_u8a = transform_u64_to_array_of_u8(self.transactions.amount);
+        let mut out = [0; (2 + 4 + 32 + 4 + 8 + 32 + 8)];
+        out[..2].clone_from_slice(&self.version);
+        out[2..(2 + 4)].clone_from_slice(&index_u8a);
+        out[(2 + 4)..(2 + 4 + 32)].clone_from_slice(&self.prev_hash);
+        out[(2 + 4 + 32)..(2 + 4 + 32 + 4)].clone_from_slice(&nonce_u8a);
+        out[(2 + 4 + 32 + 4)..(2 + 4 + 32 + 4 + 8)]
+            .clone_from_slice(&timestamp_u8a);
+        out[(2 + 4 + 32 + 4 + 8)..(2 + 4 + 32 + 4 + 8 + 32)]
+            .clone_from_slice(&self.merkle_root);
+        out[(2 + 4 + 32 + 4 + 8 + 32)..(2 + 4 + 32 + 4 + 8 + 32 + 8)]
+             .clone_from_slice(&amount_u8a);
         out
     }
 
@@ -135,16 +157,28 @@ impl Transaction {
     fn generate_transaction_signature(&mut self, sk: &[u8; 32]) {
         let secp = secp256k1::Secp256k1::new();
         let sk = SecretKey::from_slice(&secp, sk).unwrap();
-        let amount = transform_u32_to_array_of_u8(self.amount);
-        let bytes = [&self.source[..], &self.destination[..], &amount[..]].concat();
-        let message = Message::from_slice(&bytes).expect("Failed to create message from slice");
+        let amount = transform_u64_to_array_of_u8(self.amount);
+        let bytes =
+            [&self.source[..], &self.destination[..], &amount[..]].concat();
+        let bytes = sha_256_bytes(&bytes);
+        let message = Message::from_slice(&bytes).unwrap();
         let result = secp.sign(&message, &sk).expect("Failed to sign");
-        let signature = result.serialize_der(&secp);
-        &self.signature[0..72].clone_from_slice(&signature);
+        let signature = result.serialize_compact(&secp);
+        &self.signature[0..64].clone_from_slice(&signature);
     }
 
-    fn serialize(&self) -> [u8; (72+25+25+4+4)] {
-        let out = [0; (72+25+25+4+4)];
+    fn serialize(&self) -> [u8; (64 + 25 + 25 + 33 + 8 + 4)] {
+        let mut out = [0; (64 + 25 + 25 + 33 + 8 + 4)];
+        out[..64].clone_from_slice(&self.signature);
+        out[64..(64 + 25)].clone_from_slice(&self.source);
+        out[(64 + 25)..(64 + 25 + 25)].clone_from_slice(&self.destination);
+        out[(64 + 25 + 25)..(64 + 25 + 25 + 33)].clone_from_slice(&self.pk);
+        out[(64 + 25 + 25 + 33)..(64 + 25 + 25 + 33 + 8)]
+            .clone_from_slice(&transform_u64_to_array_of_u8(self.amount));
+        out[(64 + 25 + 25 + 33 + 8)..(64 + 25 + 25 + 33 + 8 + 4)]
+            .clone_from_slice(&transform_u32_to_array_of_u8(
+                self.nonce_overflow,
+            ));
         out
     }
 }
@@ -157,38 +191,102 @@ fn transform_u32_to_array_of_u8(x: u32) -> [u8; 4] {
     return [b1, b2, b3, b4];
 }
 
+fn transform_u64_to_array_of_u8(x: u64) -> [u8; 8] {
+    let b1: u8 = ((x >> 54) & 0xff) as u8;
+    let b2: u8 = ((x >> 48) & 0xff) as u8;
+    let b3: u8 = ((x >> 40) & 0xff) as u8;
+    let b4: u8 = ((x >> 32) & 0xff) as u8;
+    let b5: u8 = ((x >> 24) & 0xff) as u8;
+    let b6: u8 = ((x >> 16) & 0xff) as u8;
+    let b7: u8 = ((x >> 8) & 0xff) as u8;
+    let b8: u8 = (x & 0xff) as u8;
+    return [b1, b2, b3, b4, b5, b6, b7, b8];
+}
+
 fn difficulty_calculations() {
     // 0x1d00ffff;
     let difficulty_1_target = [29, 0, 255, 255];
-    let diff_second_part: u32 =
-        difficulty_1_target[3] | (difficulty_1_target[2] << 8) | (difficulty_1_target[1] << 16);
+    let diff_second_part: u32 = difficulty_1_target[3]
+        | (difficulty_1_target[2] << 8)
+        | (difficulty_1_target[1] << 16);
     // https://en.bitcoin.it/wiki/Difficulty
     // 0x00ffff * 2**(8*(0x1d - 3));
     let difficulty = U256::from_big_endian(&[2]);
-    let difficulty = difficulty.pow(U256::from(8 * (difficulty_1_target[0] - 3)));
+    let difficulty =
+        difficulty.pow(U256::from(8 * (difficulty_1_target[0] - 3)));
     let difficulty = difficulty.saturating_mul(U256::from(diff_second_part));
     let mut out: [u8; 32] = [0; 32];
     difficulty.to_big_endian(&mut out);
+
+    let mut valid_hash = [0; 32];
+    let valid_hash_u256 = U256::from_big_endian(&valid_hash);
+    println!("{:?}", valid_hash_u256 < difficulty);
+
+    valid_hash[2] = 1;
+    let valid_hash_u256 = U256::from_big_endian(&valid_hash);
+    println!("{:?}", valid_hash_u256 < difficulty);
 
     println!("{:?}", out);
     println!("{:?}", difficulty_1_target);
 }
 
-fn genesis_block() -> Block {
-    let transactions: Vec<Transaction> = Vec::new();
+fn hash_is_valid_with_current_difficulty(hash: [u8; 32]) -> bool {
+    let hash_u256 = U256::from_big_endian(&hash);
+    let difficulty = [
+        0, 0, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    // let difficulty = [
+    //     0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    //     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    // ];
+    let difficulty = U256::from_big_endian(&difficulty);
+    return hash_u256 < difficulty;
+}
+
+fn mine_genesis_block() -> Block {
+    let mut transactions: Vec<Transaction> = Vec::new();
+    let address = Address::new();
+    let transaction =
+        address.create_transaction(5000000000, address.address, true);
+    transactions.push(transaction);
     let transactions = Transactions {
-        amount: 0,
+        amount: 5000000000,
         transactions: transactions,
     };
-    Block {
+
+    // one transaction, so just double sha it
+    let merkle_root = sha_256_bytes(&sha_256_bytes(&transactions.transactions
+        [0]
+        .serialize()));
+
+    let mut block = Block {
         index: 0,
-        merkle_root: [0; 32],
+        version: [0; 2],
+        merkle_root: merkle_root,
         prev_hash: [0; 32],
-        hash: [0; 32],
         transactions: transactions,
         nonce: 0,
-        timestamp: 0,
+        timestamp: current_epoch(),
+    };
+    loop {
+        let hash = block.hash();
+        if hash_is_valid_with_current_difficulty(hash) {
+            println!("hash {:?}", hash);
+            println!("nonce {:?}", block.nonce);
+            println!("ts {:?}", block.timestamp);
+            let transaction = &block.transactions.transactions[0];
+            println!("pk1 {:?}", &transaction.pk[..32]);
+            println!("pk2 {:?}", &transaction.pk[32..]);
+            println!("sig1 {:?}", &transaction.signature[..32]);
+            println!("sig2 {:?}", &transaction.signature[32..]);
+            println!("address {:?}", address.address);
+            break;
+        };
+        block.nonce += 1
     }
+
+    block
 }
 
 fn sha_256_bytes(bytes: &[u8]) -> [u8; 32] {
@@ -199,26 +297,10 @@ fn sha_256_bytes(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-// fn mine(prev_hash: [u8; 32], index: u32) {
-//     let data = String::from("next block");
-//     let mut nonce = 0;
-//     let index = index + 1;
-//     let timestamp = current_epoch();
-//     loop {
-//         let hash = calculate_hash(index, &prev_hash, &data, timestamp, nonce);
-//         if hash.starts_with("0") {
-//             println!("{:?}", hash);
-//             break;
-//         } else {
-//             nonce += 1;
-//         }
-//     }
-// }
-
-// fn current_epoch() -> u64 {
-//     let start = SystemTime::now();
-//     let since_the_epoch = start
-//         .duration_since(UNIX_EPOCH)
-//         .expect("Time went backwards");
-//     return since_the_epoch.as_secs();
-// }
+fn current_epoch() -> u64 {
+    let start = SystemTime::now();
+    let since_the_epoch = start
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards");
+    return since_the_epoch.as_secs();
+}
