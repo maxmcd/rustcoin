@@ -15,10 +15,32 @@ use rand::OsRng;
 use rust_base58::{FromBase58, ToBase58};
 use secp256k1::key::{PublicKey, SecretKey};
 use secp256k1::Message;
+use std::env;
+use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
-    let _block = mine_genesis_block();
+    let args: Vec<_> = env::args().collect();
+    if args.len() > 1 {
+        let command = &args[1];
+        match command.as_ref() {
+            "help" => println!("{}", "commands: new-address, addresses"),
+            "new-address" => {
+                println!("{}", "new address");
+                create_new_address();
+            }
+            "addresses" => println!("{}", "addresses"),
+            _ => println!("{}", "invalid arg"),
+        }
+    } else {
+        println!("{:?}", "Run rustcoin without args, starting node.");
+        let _block = mine_genesis_block();
+    }
+}
+
+struct Wallet {
+    version: [u8; 2],
+    addresses: Vec<Address>,
 }
 
 struct Transactions {
@@ -28,7 +50,7 @@ struct Transactions {
 
 struct Transaction {
     signature: [u8; 64],
-    source: [u8; 25], // source is "coinbase" for coinbase transaction
+    source: [u8; 25], // source is coinbase() for coinbase transaction
     destination: [u8; 25],
     pk: [u8; 33],
     amount: u64,
@@ -52,12 +74,37 @@ struct Address {
 }
 
 fn coinbase() -> [u8; 25] {
+    // "coinbase"
     // let coinbasehex = 0x636f696e62617365
     let mut out = [0; 25];
     out[..8].clone_from_slice(
         &[0x63, 0x6f, 0x69, 0x6e, 0x62, 0x61, 0x73, 0x65][..],
     );
     out
+}
+
+fn rustcoin_dir() -> std::path::PathBuf {
+    let home_dir = env::home_dir().unwrap();
+    home_dir.join(".rustcoin")
+}
+
+fn create_data_dir() -> (fs::File, fs::File) {
+    let rustcoin_dir = rustcoin_dir();
+    match fs::read_dir(&rustcoin_dir) {
+        Ok(dir) => {}
+        Err(error) => {
+            fs::create_dir(&rustcoin_dir);
+        }
+    };
+    let wallet = fs::File::create(rustcoin_dir.join("wallet.dat")).unwrap();
+    let blockdata =
+        fs::File::create(rustcoin_dir.join("blockdata.dat")).unwrap();
+    return (wallet, blockdata);
+}
+
+fn create_new_address() {
+    let _address = Address::new();
+    create_data_dir();
 }
 
 impl Address {
@@ -92,9 +139,8 @@ impl Address {
 
     fn serialize(&self) -> [u8; (32 + 33 + 25)] {
         let mut out = [0; (32 + 33 + 25)];
-        out[..32].clone_from_slice(&self.sk[..]);
-        out[32..(32 + 33)].clone_from_slice(&self.pk[..]);
-        out[(32 + 33)..(32 + 33 + 25)].clone_from_slice(&self.address[..]);
+        let bytes = [&self.sk[..], &self.pk[..], &self.address[..]].concat();
+        out[..].clone_from_slice(&bytes);
         out
     }
 
@@ -130,16 +176,16 @@ impl Block {
         let timestamp_u8a = transform_u64_to_array_of_u8(self.timestamp);
         let amount_u8a = transform_u64_to_array_of_u8(self.transactions.amount);
         let mut out = [0; (2 + 4 + 32 + 4 + 8 + 32 + 8)];
-        out[..2].clone_from_slice(&self.version);
-        out[2..(2 + 4)].clone_from_slice(&index_u8a);
-        out[(2 + 4)..(2 + 4 + 32)].clone_from_slice(&self.prev_hash);
-        out[(2 + 4 + 32)..(2 + 4 + 32 + 4)].clone_from_slice(&nonce_u8a);
-        out[(2 + 4 + 32 + 4)..(2 + 4 + 32 + 4 + 8)]
-            .clone_from_slice(&timestamp_u8a);
-        out[(2 + 4 + 32 + 4 + 8)..(2 + 4 + 32 + 4 + 8 + 32)]
-            .clone_from_slice(&self.merkle_root);
-        out[(2 + 4 + 32 + 4 + 8 + 32)..(2 + 4 + 32 + 4 + 8 + 32 + 8)]
-             .clone_from_slice(&amount_u8a);
+        let bytes = [
+            &self.version[..],
+            &index_u8a[..],
+            &self.prev_hash[..],
+            &nonce_u8a,
+            &timestamp_u8a,
+            &self.merkle_root,
+            &amount_u8a,
+        ].concat();
+        out[..].clone_from_slice(&bytes[..]);
         out
     }
 
@@ -169,16 +215,16 @@ impl Transaction {
 
     fn serialize(&self) -> [u8; (64 + 25 + 25 + 33 + 8 + 4)] {
         let mut out = [0; (64 + 25 + 25 + 33 + 8 + 4)];
-        out[..64].clone_from_slice(&self.signature);
-        out[64..(64 + 25)].clone_from_slice(&self.source);
-        out[(64 + 25)..(64 + 25 + 25)].clone_from_slice(&self.destination);
-        out[(64 + 25 + 25)..(64 + 25 + 25 + 33)].clone_from_slice(&self.pk);
-        out[(64 + 25 + 25 + 33)..(64 + 25 + 25 + 33 + 8)]
-            .clone_from_slice(&transform_u64_to_array_of_u8(self.amount));
-        out[(64 + 25 + 25 + 33 + 8)..(64 + 25 + 25 + 33 + 8 + 4)]
-            .clone_from_slice(&transform_u32_to_array_of_u8(
-                self.nonce_overflow,
-            ));
+        let bytes = [
+            &self.signature[..],
+            &self.source[..],
+            &self.destination[..],
+            &self.pk[..],
+            &transform_u64_to_array_of_u8(self.amount),
+            &transform_u32_to_array_of_u8(self.nonce_overflow),
+        ].concat();
+
+        out[..].clone_from_slice(&bytes[..]);
         out
     }
 }
