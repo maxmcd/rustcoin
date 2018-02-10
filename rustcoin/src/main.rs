@@ -7,11 +7,11 @@ extern crate secp256k1;
 extern crate time;
 
 use bigint::uint::U256;
-use core::ops::Index;
 use crypto::digest::Digest;
 use crypto::ripemd160::Ripemd160;
 use crypto::sha2::Sha256;
 use rand::OsRng;
+use std::io::Read;
 use rust_base58::ToBase58;
 use secp256k1::Message;
 use secp256k1::key::{PublicKey, SecretKey};
@@ -34,7 +34,7 @@ fn main() {
         }
     } else {
         println!(
-            "{:?}",
+            "{}",
             "Starting rustcoin node...\nAvailable commands: \n\tnew-address\n\taddresses");
         let _block = mine_genesis_block();
     }
@@ -54,12 +54,12 @@ struct TxIn {
     tx_index: u32,
     previous_tx: [u8; 32], // hash is coinbase() for coinbase transaction
     amount: u64,
-    pk: [u8; 33],
+    pk: [u8; 64],
     signature: [u8; 64],
 }
 
 struct TxOut {
-    destination: [u8; 33],
+    destination: [u8; 64],
     amount: u64,
 }
 
@@ -75,8 +75,7 @@ struct Block {
 
 struct Address {
     sk: [u8; 32],
-    pk: [u8; 33],
-    address: [u8; 25],
+    pk: [u8; 64],
 }
 
 fn coinbase() -> [u8; 32] {
@@ -109,8 +108,39 @@ fn create_data_dir() -> (fs::File, fs::File) {
 }
 
 fn create_new_address() {
-    let _address = Address::new();
-    create_data_dir();
+    let (mut wallet, _) = create_data_dir();
+    let mut version = [0u8; 2];
+    let mut wallet = match wallet.read(&mut version) {
+        Ok(_) => {
+            let mut len = [0u8];
+            // maximum 255 addresses
+            wallet.read(&mut len).unwrap();
+            let mut addresses: Vec<Address> = Vec::new();
+            for _ in 0..len[0] {
+                let mut address = [0u8; (32 + 64)];
+                wallet.read(&mut address).unwrap();
+                let mut sk = [0; 32];
+                sk[..].clone_from_slice(&address[..32]);
+                let mut pk = [0; 64];
+                pk[..].clone_from_slice(&address[32..64]);
+                addresses.push(Address { sk: sk, pk: pk })
+            }
+            Wallet {
+                addresses: addresses,
+                version: version,
+            }
+        }
+        Err(_) => {
+            let mut addresses: Vec<Address> = Vec::new();
+            Wallet {
+                version: [0u8, 1],
+                addresses: addresses,
+            }
+        }
+    };
+    let address = Address::new();
+    println!("{}", address.address());
+    wallet.addresses.push(address);
 }
 
 impl Address {
@@ -119,36 +149,41 @@ impl Address {
         let secp = secp256k1::Secp256k1::new();
         let mut rng = OsRng::new().unwrap();
         let (secret_key, public_key) = secp.generate_keypair(&mut rng).unwrap();
-        let mut result_bytes = sha_256_bytes(secret_key.index(0..32));
-
-        let mut rmd160 = Ripemd160::new();
-        rmd160.input(&mut result_bytes);
-        let mut rmd160_result = [0; 20];
-        rmd160.result(&mut rmd160_result);
-
-        let version = [0];
-        let with_version = [&version[..1], &rmd160_result[..20]].concat();
-        let sha_twice = sha_256_bytes(&sha_256_bytes(&with_version));
-        let mut address = [0; 25];
-        address[..21].clone_from_slice(&with_version[..21]);
-        address[21..25].clone_from_slice(&sha_twice[..4]);
-
-        // secp256k1::constants::SECRET_KEY_SIZE
-        let mut sk = [0; 32];
-        sk[..32].clone_from_slice(&secret_key[..32]);
-        Address {
-            address: address,
-            pk: public_key.serialize(),
-            sk: sk,
-        }
+        let mut sk = [0u8; 32];
+        sk[..].clone_from_slice(&secret_key[..32]);
+        let mut pk = [0u8; 64];
+        // first byte is 4
+        pk[..].clone_from_slice(&public_key.serialize_uncompressed()[1..65]);
+        Address { pk: pk, sk: sk }
     }
 
-    fn serialize(&self) -> [u8; (32 + 33 + 25)] {
-        let mut out = [0; (32 + 33 + 25)];
-        let bytes = [&self.sk[..], &self.pk[..], &self.address[..]].concat();
+    fn address(&self) -> String {
+        address_from_pk(self.pk)
+    }
+
+    fn serialize(&self) -> [u8; (32 + 64)] {
+        let mut out = [0; (32 + 64)];
+        let bytes = [&self.sk[..], &self.pk[..]].concat();
         out[..].clone_from_slice(&bytes);
         out
     }
+}
+
+fn address_from_pk(pk: [u8; 64]) -> String {
+    let mut result_bytes = sha_256_bytes(&pk[0..64]);
+
+    let mut rmd160 = Ripemd160::new();
+    rmd160.input(&mut result_bytes);
+    let mut rmd160_result = [0; 20];
+    rmd160.result(&mut rmd160_result);
+
+    let version = [0];
+    let with_version = [&version[..1], &rmd160_result[..20]].concat();
+    let sha_twice = sha_256_bytes(&sha_256_bytes(&with_version));
+    let mut address = [0; 25];
+    address[..21].clone_from_slice(&with_version[..21]);
+    address[21..25].clone_from_slice(&sha_twice[..4]);
+    address.to_base58()
 }
 
 impl Block {
@@ -258,12 +293,12 @@ fn transform_u64_to_array_of_u8(x: u64) -> [u8; 8] {
     return [b1, b2, b3, b4, b5, b6, b7, b8];
 }
 
-fn create_coinbase_transaction(destination: [u8; 33]) -> Transaction {
+fn create_coinbase_transaction(destination: [u8; 64]) -> Transaction {
     let tx_in = TxIn {
         previous_tx: coinbase(),
         tx_index: 0,
         amount: 5000000000,
-        pk: [0; 33],
+        pk: [0; 64],
         signature: [0; 64],
     };
     let tx_out = TxOut {
