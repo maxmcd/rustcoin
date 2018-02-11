@@ -11,7 +11,7 @@ use crypto::digest::Digest;
 use crypto::ripemd160::Ripemd160;
 use crypto::sha2::Sha256;
 use rand::OsRng;
-use std::io::Read;
+use std::io::{Read, Write};
 use rust_base58::ToBase58;
 use secp256k1::Message;
 use secp256k1::key::{PublicKey, SecretKey};
@@ -26,10 +26,13 @@ fn main() {
         match command.as_ref() {
             "help" => println!("{}", "commands: new-address, addresses"),
             "new-address" => {
-                println!("{}", "new address");
+                println!("{}", "Creating new address");
                 create_new_address();
             }
-            "addresses" => println!("{}", "addresses"),
+            "addresses" => {
+                println!("{}", "Your wallet addresses:");
+                list_addresses();
+            }
             _ => println!("{}", "invalid arg"),
         }
     } else {
@@ -101,28 +104,37 @@ fn create_data_dir() -> (fs::File, fs::File) {
             let _result = fs::create_dir(&rustcoin_dir);
         }
     };
-    let wallet = fs::File::create(rustcoin_dir.join("wallet.dat")).unwrap();
-    let blockdata =
-        fs::File::create(rustcoin_dir.join("blockdata.dat")).unwrap();
+    let wallet = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&rustcoin_dir.join("wallet.dat"))
+        .unwrap();
+    let blockdata = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&rustcoin_dir.join("blockdata.dat"))
+        .unwrap();
     return (wallet, blockdata);
 }
 
-fn create_new_address() {
-    let (mut wallet, _) = create_data_dir();
+fn fetch_wallet() -> Wallet {
+    let (mut wallet_file, _) = create_data_dir();
     let mut version = [0u8; 2];
-    let mut wallet = match wallet.read(&mut version) {
+    let wallet = match wallet_file.read(&mut version) {
         Ok(_) => {
             let mut len = [0u8];
             // maximum 255 addresses
-            wallet.read(&mut len).unwrap();
+            wallet_file.read(&mut len).unwrap();
             let mut addresses: Vec<Address> = Vec::new();
             for _ in 0..len[0] {
                 let mut address = [0u8; (32 + 64)];
-                wallet.read(&mut address).unwrap();
+                wallet_file.read(&mut address).unwrap();
                 let mut sk = [0; 32];
                 sk[..].clone_from_slice(&address[..32]);
                 let mut pk = [0; 64];
-                pk[..].clone_from_slice(&address[32..64]);
+                pk[..].clone_from_slice(&address[32..(64 + 32)]);
                 addresses.push(Address { sk: sk, pk: pk })
             }
             Wallet {
@@ -131,6 +143,7 @@ fn create_new_address() {
             }
         }
         Err(_) => {
+            // TODO: return unexpected errors
             let mut addresses: Vec<Address> = Vec::new();
             Wallet {
                 version: [0u8, 1],
@@ -138,9 +151,30 @@ fn create_new_address() {
             }
         }
     };
+    wallet
+}
+
+fn create_new_address() {
+    let mut wallet = fetch_wallet();
     let address = Address::new();
     println!("{}", address.address());
     wallet.addresses.push(address);
+    // Using the same file we've opened writes data to the disk that
+    // is partially updated. This fixes that, find out why?
+    // maybe the file just needs to be flushed before writing?
+    let mut wallet_file = fs::OpenOptions::new()
+        .write(true)
+        .open(&rustcoin_dir().join("wallet.dat"))
+        .unwrap();
+    wallet_file.write_all(&wallet.serialize()).unwrap();
+    wallet_file.sync_data().unwrap();
+}
+
+fn list_addresses() {
+    let wallet = fetch_wallet();
+    for address in wallet.addresses {
+        println!("{}", address.address());
+    }
 }
 
 impl Address {
@@ -165,6 +199,27 @@ impl Address {
         let mut out = [0; (32 + 64)];
         let bytes = [&self.sk[..], &self.pk[..]].concat();
         out[..].clone_from_slice(&bytes);
+        out
+    }
+}
+
+impl Wallet {
+    fn serialize(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        out.push(self.version[0]);
+        out.push(self.version[1]);
+        let length = self.addresses.len() as u8;
+        println!("{:?}", length);
+        out.push(length);
+        println!("{:?}", out);
+        for i in 0..length {
+            let index = i as usize;
+            let address = self.addresses[index].serialize();
+            for i in 0..(32 + 64) {
+                out.push(address[i]);
+            }
+        }
+        println!("{:?}", out);
         out
     }
 }
@@ -205,23 +260,50 @@ impl Block {
         out
     }
 
-    fn calculate_merkel_root(&self) -> [u8; 32] {
-        let out = [0; 32];
-        out
-    }
-
     fn hash(&self) -> [u8; 32] {
         sha_256_bytes(&self.bytes_to_hash())
     }
 }
 
-impl TxIn {}
+fn transactions_merkle_root(transactions: &Vec<Transaction>) -> [u8; 32] {
+    let mut items: Vec<[u8; 32]> = Vec::new();
+    for transaction in transactions {
+        items.push(sha_256_bytes(&sha_256_bytes(&transaction.serialize())));
+    }
+    merkle(items)
+}
 
-// fn merkle_root(transactions: ) {
-//     let length = transactions.len();
-//     // has to be a power of 2?
-//     // clone one remaining item to fill leaves?
-// }
+// as a verb?
+fn merkle(items: Vec<[u8; 32]>) -> [u8; 32] {
+    let items = if items.len() == 1 {
+        items
+    } else {
+        merkle_process_nodes(items)
+    };
+    sha_256_bytes(&sha_256_bytes(&items[0]))
+}
+fn merkle_process_nodes(mut items: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
+    let mut out: Vec<[u8; 32]> = Vec::new();
+    if items.len() % 2 == 1 {
+        // Copy the last item to make the leaf count even if necessary
+        let mut last_item = [0; 32];
+        last_item[..].copy_from_slice(&items[items.len() - 1][..]);
+        items.push(last_item);
+    }
+    for _ in 0..(items.len() / 2) {
+        let right = items.pop().unwrap();
+        let left = items.pop().unwrap();
+        let result =
+            sha_256_bytes(&sha_256_bytes(&[&left[..], &right[..]].concat()));
+        out.push(result)
+    }
+    if out.len() == 1 {
+        return out;
+    }
+    return merkle_process_nodes(out);
+}
+
+impl TxIn {}
 
 impl TxIn {
     fn serialize(&self) -> Vec<u8> {
@@ -311,7 +393,7 @@ fn create_coinbase_transaction(destination: [u8; 64]) -> Transaction {
     }
 }
 
-fn difficulty_calculations() {
+fn _difficulty_calculations() {
     // 0x1d00ffff;
     let difficulty_1_target = [29, 0, 255, 255];
     let diff_second_part: u32 = difficulty_1_target[3]
@@ -340,34 +422,35 @@ fn difficulty_calculations() {
 
 fn hash_is_valid_with_current_difficulty(hash: [u8; 32]) -> bool {
     let hash_u256 = U256::from_big_endian(&hash);
-    let difficulty = [
-        0, 0, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
     // let difficulty = [
-    //     0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    //     0, 0, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     //     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     // ];
+    let difficulty = [
+        0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
     let difficulty = U256::from_big_endian(&difficulty);
     return hash_u256 < difficulty;
 }
 
 fn mine_genesis_block() -> Block {
     let address = Address::new();
+    println!("sk {:?}", &address.sk[..32]);
     let transaction = create_coinbase_transaction(address.pk);
-
+    let transactions = vec![transaction];
     // one transaction, so just double sha it
-    let merkle_root = [0; 32];
 
     let mut block = Block {
         index: 0,
         version: [0; 2],
-        merkle_root: merkle_root,
+        merkle_root: transactions_merkle_root(&transactions),
         prev_hash: [0; 32],
-        transactions: vec![transaction],
+        transactions: transactions,
         nonce: 0,
         timestamp: current_epoch(),
     };
+
     loop {
         let hash = block.hash();
         if hash_is_valid_with_current_difficulty(hash) {
@@ -403,8 +486,42 @@ fn current_epoch() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::create_coinbase_transaction;
+    use super::transactions_merkle_root;
+    use super::Block;
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn verify_genesis_block() {
+        let _sk: [u8; 32] = [
+            37, 80, 185, 241, 1, 193, 142, 141, 126, 125, 221, 123, 78, 164,
+            164, 42, 171, 220, 35, 33, 155, 143, 151, 73, 28, 28, 252, 88, 65,
+            236, 190, 138,
+        ];
+        let hash: [u8; 32] = [
+            0, 0, 16, 209, 176, 119, 41, 220, 136, 124, 227, 200, 64, 253, 93,
+            164, 85, 175, 8, 94, 64, 63, 255, 201, 184, 200, 252, 123, 27, 81,
+            238, 88,
+        ];
+        let nonce: u64 = 24930;
+        let ts: u64 = 1518313606;
+        let pk: [u8; 64] = [
+            114, 32, 241, 194, 225, 116, 46, 154, 46, 124, 62, 72, 64, 1, 153,
+            181, 137, 248, 106, 16, 108, 176, 187, 132, 110, 121, 201, 107, 90,
+            163, 62, 146, 96, 4, 58, 122, 27, 136, 3, 153, 206, 86, 217, 154,
+            220, 99, 114, 228, 88, 4, 90, 183, 40, 125, 218, 41, 151, 160, 203,
+            104, 254, 111, 79, 6,
+        ];
+        let transaction = create_coinbase_transaction(pk);
+        let transactions = vec![transaction];
+        let block = Block {
+            index: 0,
+            version: [0; 2],
+            merkle_root: transactions_merkle_root(&transactions),
+            prev_hash: [0; 32],
+            transactions: transactions,
+            nonce: nonce,
+            timestamp: ts,
+        };
+        assert_eq!(hash, block.hash());
+        println!("{:?}", block.hash());
     }
 }
