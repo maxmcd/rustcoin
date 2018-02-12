@@ -1,4 +1,5 @@
 extern crate bigint;
+extern crate byteorder;
 extern crate core;
 extern crate crypto;
 extern crate rand;
@@ -11,13 +12,19 @@ use crypto::digest::Digest;
 use crypto::ripemd160::Ripemd160;
 use crypto::sha2::Sha256;
 use rand::OsRng;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use rust_base58::ToBase58;
-use secp256k1::Message;
 use secp256k1::key::{PublicKey, SecretKey};
 use std::env;
 use std::fs;
+use std::net;
+use std::net::ToSocketAddrs;
 use std::time::{SystemTime, UNIX_EPOCH};
+use byteorder::ByteOrder;
+
+const MAGIC_NUMBER_SIZE: usize = 4;
+const COMMAND_SIZE: usize = 12;
 
 fn main() {
     let args: Vec<_> = env::args().collect();
@@ -39,7 +46,176 @@ fn main() {
         println!(
             "{}",
             "Starting rustcoin node...\nAvailable commands: \n\tnew-address\n\taddresses");
-        let _block = mine_genesis_block();
+        start_node();
+        // let _block = mine_genesis_block();
+    }
+}
+
+fn start_node() {
+    let port = match env::var("PORT") {
+        Ok(port) => port,
+        Err(_) => "8333".to_string(),
+    };
+    let known_node = "127.0.0.1:8333";
+    let mut active_nodes: HashMap<net::SocketAddr, u64> = HashMap::new();
+    if port != "8333".to_string() {
+        active_nodes
+            .insert(known_node.to_socket_addrs().unwrap().next().unwrap(), 0);
+    }
+
+    let socket = net::UdpSocket::bind(format!("127.0.0.1:{}", port)).unwrap();
+    println!("Broadcasting on {}", port);
+    let ping = Message {
+        payload: Vec::new(),
+        command: [0x70, 0x69, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+    let pong = Message {
+        payload: Vec::new(),
+        command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+    let getaddr = Message {
+        payload: Vec::new(),
+        command: [0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0],
+    };
+    for (node, _) in &active_nodes {
+        socket.send_to(&getaddr.serialize(), &node).unwrap();
+        println!("Sent ping to {}", &node);
+    }
+    loop {
+        // 2mb, largest message size
+        let mut buf = [0; 2_000_000];
+        let (_amt, src) = socket.recv_from(&mut buf).unwrap();
+        active_nodes.insert(src, current_epoch());
+        let (command, payload) = Message::deserialize(&buf);
+        let command = String::from_utf8_lossy(command);
+        println!("Command \"{}\" from {:?}", command, src);
+        match command.as_ref() {
+            "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                socket.send_to(&pong.serialize(), src).unwrap();
+            }
+            "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                let addr = Addr::serialize(&active_nodes);
+                socket.send_to(&addr.serialize(), src).unwrap();
+            }
+            "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                let addresses = Addr::deserialize(&payload);
+                for address in &addresses {
+                    // TODO: take the freshest timestamp
+                    active_nodes.insert(address.address, address.ts);
+                }
+                println!("{:?}", &buf[16..(32 + 16)]);
+            }
+            &_ => {
+                println!("No match for command {}", command);
+            }
+        }
+        println!("{:?}", active_nodes);
+    }
+}
+
+struct Message {
+    command: [u8; 12],
+    payload: Vec<u8>,
+}
+
+struct Addr {
+    address: net::SocketAddr,
+    ts: u64,
+}
+
+impl Addr {
+    fn serialize(active_nodes: &HashMap<net::SocketAddr, u64>) -> Message {
+        let addr_ascii = [0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0, 0, 0, 0];
+        let addrs: Vec<u8> = Vec::new();
+        let mut addr = Message {
+            command: addr_ascii,
+            payload: addrs,
+        };
+        addr.payload
+            .extend_from_slice(&u16_to_array_of_u8(active_nodes.len() as u16));
+        for (sock, ts) in active_nodes {
+            let ip_octets = match sock.ip() {
+                net::IpAddr::V4(ip) => ip.octets(),
+                net::IpAddr::V6(_) => continue,
+            };
+            addr.payload.extend_from_slice(&ip_octets);
+            addr.payload
+                .extend_from_slice(&u16_to_array_of_u8(sock.port()));
+            addr.payload.extend_from_slice(&u64_to_array_of_u8(*ts));
+        }
+        addr
+    }
+    fn deserialize(payload: &[u8]) -> Vec<Addr> {
+        let len = byteorder::BigEndian::read_u16(&payload[0..2]);
+        let mut offset = 0;
+        let addr_length = 4 + 2 + 8;
+        let header_length = 2;
+        let mut addresses: Vec<Addr> = Vec::new();
+        println!("{:?}", payload);
+        for _ in 0..len {
+            let addr = &payload
+                [header_length + offset..header_length + offset + addr_length];
+            let ip_len = 4;
+            let port_len = 2;
+            let ts_len = 8;
+            let ts = byteorder::BigEndian::read_u64(
+                &addr[ip_len + port_len..ip_len + port_len + ts_len],
+            );
+            let port = byteorder::BigEndian::read_u16(
+                &addr[ip_len..ip_len + port_len],
+            );
+            let ip = &addr[..addr_length];
+            let ipv4 = net::Ipv4Addr::new(ip[0], ip[2], ip[2], ip[3]);
+            let address = net::SocketAddr::new(net::IpAddr::V4(ipv4), port);
+            addresses.push(Addr {
+                address: address,
+                ts: ts,
+            });
+            offset += addr_length;
+        }
+        addresses
+    }
+}
+
+impl Message {
+    // fn _new(buf: &[u8]) -> Message {
+    //     //
+    // }
+    fn serialize(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        // magic numbers
+        out.extend_from_slice(&[0xF9, 0xBE, 0xB4, 0xD9]);
+        // command
+        out.extend_from_slice(&self.command);
+        // length
+        println!("{:?}", self.payload.len());
+        out.extend_from_slice(&u32_to_array_of_u8(self.payload.len() as u32));
+        // checksum
+        out.extend_from_slice(&sha_256_bytes(&sha_256_bytes(&self.payload))
+            [..4]
+            .to_vec());
+        out.extend(&self.payload);
+        out
+    }
+
+    fn deserialize(buf: &[u8]) -> (&[u8], &[u8]) {
+        // TODO confirm magic numbers
+
+        let u32_len: usize = 4;
+        let checksum_len: usize = 4;
+        let len = byteorder::BigEndian::read_u32(
+            &buf[MAGIC_NUMBER_SIZE + COMMAND_SIZE
+                     ..MAGIC_NUMBER_SIZE + COMMAND_SIZE + u32_len],
+        ) as usize;
+        println!("{:?}", len);
+        let header_offset =
+            MAGIC_NUMBER_SIZE + COMMAND_SIZE + u32_len + checksum_len;
+        let payload = &buf[header_offset..header_offset + len];
+        let _checksum = &sha_256_bytes(&sha_256_bytes(payload))[..4];
+        (
+            &buf[MAGIC_NUMBER_SIZE..MAGIC_NUMBER_SIZE + COMMAND_SIZE],
+            payload,
+        )
     }
 }
 
@@ -244,9 +420,9 @@ fn address_from_pk(pk: [u8; 64]) -> String {
 impl Block {
     // let length = (3*4) + (32);
     fn bytes_to_hash(&self) -> [u8; (2 + 4 + 32 + 8 + 8 + 32)] {
-        let index_u8a = transform_u32_to_array_of_u8(self.index);
-        let nonce_u8a = transform_u64_to_array_of_u8(self.nonce);
-        let timestamp_u8a = transform_u64_to_array_of_u8(self.timestamp);
+        let index_u8a = u32_to_array_of_u8(self.index);
+        let nonce_u8a = u64_to_array_of_u8(self.nonce);
+        let timestamp_u8a = u64_to_array_of_u8(self.timestamp);
         let mut out = [0; (2 + 4 + 32 + 8 + 8 + 32)];
         let bytes = [
             &self.version[..],
@@ -308,9 +484,9 @@ impl TxIn {}
 impl TxIn {
     fn serialize(&self) -> Vec<u8> {
         [
-            &transform_u32_to_array_of_u8(self.tx_index)[..],
+            &u32_to_array_of_u8(self.tx_index)[..],
             &self.previous_tx[..],
-            &transform_u64_to_array_of_u8(self.amount)[..],
+            &u64_to_array_of_u8(self.amount)[..],
             &self.pk[..],
             &self.signature[..],
         ].concat()
@@ -322,7 +498,7 @@ impl TxIn {
         let bytes = self.serialize();
         let bytes = &bytes[..(bytes.len() - 64)]; // remove empty sig
         let bytes = sha_256_bytes(&bytes);
-        let message = Message::from_slice(&bytes).unwrap();
+        let message = secp256k1::Message::from_slice(&bytes).unwrap();
         let result = secp.sign(&message, &sk).expect("Failed to sign");
         let signature = result.serialize_compact(&secp);
         &self.signature[..].clone_from_slice(&signature);
@@ -331,17 +507,14 @@ impl TxIn {
 
 impl TxOut {
     fn serialize(&self) -> Vec<u8> {
-        [
-            &self.destination[..],
-            &transform_u64_to_array_of_u8(self.amount)[..],
-        ].concat()
+        [&self.destination[..], &u64_to_array_of_u8(self.amount)[..]].concat()
     }
 }
 
 impl Transaction {
     fn serialize(&self) -> Vec<u8> {
-        let in_len = transform_u32_to_array_of_u8(self.tx_in.len() as u32);
-        let out_len = transform_u32_to_array_of_u8(self.tx_in.len() as u32);
+        let in_len = u32_to_array_of_u8(self.tx_in.len() as u32);
+        let out_len = u32_to_array_of_u8(self.tx_in.len() as u32);
         let mut out: Vec<u8> = Vec::new();
         out.extend_from_slice(&in_len);
         for tx_out in &self.tx_out {
@@ -353,26 +526,37 @@ impl Transaction {
         }
         out
     }
+
+    fn hash(&self) -> [u8; 32] {
+        sha_256_bytes(&self.serialize())
+    }
 }
 
-fn transform_u32_to_array_of_u8(x: u32) -> [u8; 4] {
-    let b1: u8 = ((x >> 24) & 0xff) as u8;
-    let b2: u8 = ((x >> 16) & 0xff) as u8;
-    let b3: u8 = ((x >> 8) & 0xff) as u8;
-    let b4: u8 = (x & 0xff) as u8;
-    return [b1, b2, b3, b4];
+// TODO: implement these are traits on u16/u32?
+fn u16_to_array_of_u8(x: u16) -> [u8; 2] {
+    let b1: u8 = ((x >> 8) & 0xff) as u8;
+    let b2: u8 = (x & 0xff) as u8;
+    return [b1, b2];
 }
 
-fn transform_u64_to_array_of_u8(x: u64) -> [u8; 8] {
-    let b1: u8 = ((x >> 54) & 0xff) as u8;
-    let b2: u8 = ((x >> 48) & 0xff) as u8;
-    let b3: u8 = ((x >> 40) & 0xff) as u8;
-    let b4: u8 = ((x >> 32) & 0xff) as u8;
-    let b5: u8 = ((x >> 24) & 0xff) as u8;
-    let b6: u8 = ((x >> 16) & 0xff) as u8;
-    let b7: u8 = ((x >> 8) & 0xff) as u8;
-    let b8: u8 = (x & 0xff) as u8;
-    return [b1, b2, b3, b4, b5, b6, b7, b8];
+fn array_of_u8_to_u32(x: [u8; 4]) -> u32 {
+    byteorder::BigEndian::read_u32(&x)
+}
+
+fn u32_to_array_of_u8(x: u32) -> [u8; 4] {
+    let mut out = [0; 4];
+    byteorder::BigEndian::write_u32(&mut out, x);
+    out
+}
+
+fn array_of_u8_to_u64(x: [u8; 8]) -> u64 {
+    byteorder::BigEndian::read_u64(&x)
+}
+
+fn u64_to_array_of_u8(x: u64) -> [u8; 8] {
+    let mut out = [0; 8];
+    byteorder::BigEndian::write_u64(&mut out, x);
+    out
 }
 
 fn create_coinbase_transaction(destination: [u8; 64]) -> Transaction {
@@ -488,7 +672,34 @@ fn current_epoch() -> u64 {
 mod tests {
     use super::create_coinbase_transaction;
     use super::transactions_merkle_root;
-    use super::Block;
+    use super::array_of_u8_to_u32;
+    use super::array_of_u8_to_u64;
+    use super::u32_to_array_of_u8;
+    use super::u64_to_array_of_u8;
+    use super::{Address, Block, Transaction, TxIn, TxOut};
+
+    #[test]
+    fn int_transform_verify() {
+        assert_eq!(
+            array_of_u8_to_u32(u32_to_array_of_u8(567901234u32)),
+            567901234u32
+        );
+        assert_eq!(
+            array_of_u8_to_u64(u64_to_array_of_u8(567901234u64)),
+            567901234u64
+        );
+    }
+
+    #[test]
+    fn ascii_verify() {
+        assert_eq!(
+            String::from_utf8_lossy(&[
+                0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0
+            ]),
+            "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}".to_string()
+        );
+    }
+
     #[test]
     fn verify_genesis_block() {
         let _sk: [u8; 32] = [
@@ -523,5 +734,32 @@ mod tests {
         };
         assert_eq!(hash, block.hash());
         println!("{:?}", block.hash());
+
+        // 25.0 bitcoin to new address
+        let to_address = Address::new();
+        let mut tx_in = TxIn {
+            previous_tx: block.transactions[0].hash(),
+            tx_index: 0,
+            amount: 5000000000,
+            pk: to_address.pk,
+            signature: [0; 64],
+        };
+        tx_in.sign(&to_address.sk);
+
+        // half to the destination
+        let tx_out_1 = TxOut {
+            destination: to_address.pk,
+            amount: 2500000000,
+        };
+        // the "change"
+        let tx_out_2 = TxOut {
+            destination: pk,
+            amount: 2500000000,
+        };
+
+        let _transaction = Transaction {
+            tx_in: vec![tx_in],
+            tx_out: vec![tx_out_1, tx_out_2],
+        };
     }
 }

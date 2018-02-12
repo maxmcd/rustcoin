@@ -6,6 +6,25 @@ Todo:
  - Find peers and confirm vailidity of blockchain
  - Start mining, accept transactions, add transactions to next block
 
+Steps for startup:
+ - Check local blockchain
+ - Load blocks and transactions
+ - Load unspent transactions into memory?
+ - Find clients
+ - Getblocks from last known hash
+
+Network messages
+`ping`
+`pong`
+`getblocks`
+`getaddr`
+
+`inv` blocks and transactions
+Maybe replace `inv` with specific object requests.
+`transaction`
+`block`
+
+
 
 ### Links: 
 
@@ -21,6 +40,7 @@ Merkle Tree
 Networking
  - TCP Example server: https://github.com/Nervengift/chat-server-example/blob/master/src/main.rs
  - https://users.rust-lang.org/t/how-to-write-a-simple-tcp-client-and-server/3712
+ - https://bitcoin.stackexchange.com/questions/3536/how-do-bitcoin-clients-find-each-other
 
 Bitcoin Wiki:
  - https://en.bitcoin.it/wiki/Transaction_fees
@@ -33,4 +53,3 @@ Bitcoin Wiki:
  - https://en.bitcoin.it/wiki/Confirmation
  - https://en.bitcoin.it/wiki/Script
  - https://en.bitcoin.it/wiki/Genesis_block
-

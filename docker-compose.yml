@@ -1,23 +1,13 @@
 version: '3'
 volumes:
-  chaindata:
+  blockdata_dir:
     external: true
-  # persisted_node:
-  #   external: true
 
 services:
-  python:
-    build: ./python
-    volumes:
-      - ./python:/opt/python
-      - chaindata:/opt/chaindata
-    ports:
-      - "5000:5000"
-    restart: on-failure
   rustcoin:
     build: ./rustcoin
     volumes: 
       - ./rustcoin:/opt/rustcoin
-      - blockdata:/root/.rustcoin/blockdata
+      - blockdata_dir:/root/.rustcoin/
     ports:
-      - "8333:8333"
+      - "8333:8333/udp"
