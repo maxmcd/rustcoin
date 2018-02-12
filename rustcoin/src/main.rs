@@ -5,23 +5,22 @@ extern crate crypto;
 extern crate rand;
 extern crate rust_base58;
 extern crate secp256k1;
-extern crate time;
 
 use bigint::uint::U256;
+use byteorder::ByteOrder;
 use crypto::digest::Digest;
 use crypto::ripemd160::Ripemd160;
 use crypto::sha2::Sha256;
 use rand::OsRng;
-use std::collections::HashMap;
-use std::io::{Read, Write};
 use rust_base58::ToBase58;
 use secp256k1::key::{PublicKey, SecretKey};
-use std::env;
-use std::fs;
-use std::net;
+use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use byteorder::ByteOrder;
+use std::{env, fs, net, thread, time};
 
 const MAGIC_NUMBER_SIZE: usize = 4;
 const COMMAND_SIZE: usize = 12;
@@ -57,18 +56,25 @@ fn start_node() {
         Err(_) => "8333".to_string(),
     };
     let known_node = "127.0.0.1:8333";
-    let mut active_nodes: HashMap<net::SocketAddr, u64> = HashMap::new();
+    let active_nodes_arc: Arc<RwLock<HashMap<net::SocketAddr, u64>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let active_nodes_rw = Arc::clone(&active_nodes_arc);
+
     if port != "8333".to_string() {
-        active_nodes
-            .insert(known_node.to_socket_addrs().unwrap().next().unwrap(), 0);
+        {
+            let mut active_nodes = active_nodes_rw.write().unwrap();
+
+            active_nodes.insert(
+                known_node.to_socket_addrs().unwrap().next().unwrap(),
+                0,
+            );
+        }
     }
 
     let socket = net::UdpSocket::bind(format!("127.0.0.1:{}", port)).unwrap();
+
     println!("Broadcasting on {}", port);
-    let ping = Message {
-        payload: Vec::new(),
-        command: [0x70, 0x69, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
-    };
+
     let pong = Message {
         payload: Vec::new(),
         command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -77,39 +83,79 @@ fn start_node() {
         payload: Vec::new(),
         command: [0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0],
     };
-    for (node, _) in &active_nodes {
-        socket.send_to(&getaddr.serialize(), &node).unwrap();
-        println!("Sent ping to {}", &node);
+    // let (message_sender, message_receiver) = mpsc::channel::<ToSend>();
+
+    {
+        let active_nodes = active_nodes_rw.read().unwrap();
+        for (node, _) in active_nodes.iter() {
+            socket.send_to(&getaddr.serialize(), &node).unwrap();
+            println!("Sent getaddr to {}", &node);
+        }
     }
+
+    let send_socket = socket.try_clone().unwrap();
+    // // Message sender
+    // thread::spawn(move || {
+
+    // });
+
+    // Scheduled task sender
+    thread::spawn(move || {
+        let active_nodes_rw = Arc::clone(&active_nodes_arc);
+        let ping = Message {
+            payload: Vec::new(),
+            command: [0x70, 0x69, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        loop {
+            thread::sleep(time::Duration::from_millis(1000));
+            let active_nodes = active_nodes_rw.read().unwrap();
+            for (node, _) in active_nodes.iter() {
+                println!("Sent ping to {}", &node);
+                send_socket.send_to(&ping.serialize(), node).unwrap();
+            }
+        }
+    });
+
+    // Message receiver
     loop {
         // 2mb, largest message size
         let mut buf = [0; 2_000_000];
         let (_amt, src) = socket.recv_from(&mut buf).unwrap();
-        active_nodes.insert(src, current_epoch());
+        {
+            let mut active_nodes = active_nodes_rw.write().unwrap();
+            active_nodes.insert(src, current_epoch());
+        }
         let (command, payload) = Message::deserialize(&buf);
         let command = String::from_utf8_lossy(command);
-        println!("Command \"{}\" from {:?}", command, src);
+        println!("Command \"{}\" from {}", command, src);
         match command.as_ref() {
             "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
                 socket.send_to(&pong.serialize(), src).unwrap();
             }
             "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                let active_nodes = active_nodes_rw.read().unwrap();
                 let addr = Addr::serialize(&active_nodes);
                 socket.send_to(&addr.serialize(), src).unwrap();
             }
             "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                let addresses = Addr::deserialize(&payload);
-                for address in &addresses {
-                    // TODO: take the freshest timestamp
-                    active_nodes.insert(address.address, address.ts);
+                {
+                    let mut active_nodes = active_nodes_rw.write().unwrap();
+                    let addresses = Addr::deserialize(&payload);
+                    for address in &addresses {
+                        // Don't add me
+                        if socket.local_addr().unwrap() != address.address {
+                            // TODO: take the freshest timestamp
+                            active_nodes.insert(address.address, address.ts);
+                        }
+                    }
+                    println!("{:?}", &buf[16..(32 + 16)]);
                 }
-                println!("{:?}", &buf[16..(32 + 16)]);
             }
+            "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {}
             &_ => {
                 println!("No match for command {}", command);
             }
         }
-        println!("{:?}", active_nodes);
     }
 }
 
@@ -151,7 +197,6 @@ impl Addr {
         let addr_length = 4 + 2 + 8;
         let header_length = 2;
         let mut addresses: Vec<Addr> = Vec::new();
-        println!("{:?}", payload);
         for _ in 0..len {
             let addr = &payload
                 [header_length + offset..header_length + offset + addr_length];
@@ -188,7 +233,6 @@ impl Message {
         // command
         out.extend_from_slice(&self.command);
         // length
-        println!("{:?}", self.payload.len());
         out.extend_from_slice(&u32_to_array_of_u8(self.payload.len() as u32));
         // checksum
         out.extend_from_slice(&sha_256_bytes(&sha_256_bytes(&self.payload))
