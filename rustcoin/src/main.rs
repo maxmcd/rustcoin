@@ -24,6 +24,17 @@ use std::{env, fs, net, thread, time};
 
 const MAGIC_NUMBER_SIZE: usize = 4;
 const COMMAND_SIZE: usize = 12;
+const VERSION_SIZE: usize = 2;
+const INDEX_SIZE: usize = 4;
+const U32_SIZE: usize = 4;
+const U64_SIZE: usize = 8;
+const NONCE_SIZE: usize = 8;
+const TS_SIZE: usize = 8;
+const HASH_SIZE: usize = 32;
+const TX_IN_SIZE: usize = (4 + 32 + 8 + 64 + 64);
+const TX_OUT_SIZE: usize = (64 + 8);
+const PK_SIZE: usize = 64;
+const SIG_SIZE: usize = 64;
 
 fn main() {
     let args: Vec<_> = env::args().collect();
@@ -45,9 +56,16 @@ fn main() {
         println!(
             "{}",
             "Starting rustcoin node...\nAvailable commands: \n\tnew-address\n\taddresses");
-        start_node();
-        // let _block = mine_genesis_block();
+        let _block = mine_genesis_block();
+        // start_node();
     }
+}
+
+fn get_blocks() -> Vec<Block> {
+    let out: Vec<Block> = Vec::new();
+    let (_, blockdata) = create_data_dir();
+
+    out
 }
 
 fn start_node() {
@@ -56,6 +74,9 @@ fn start_node() {
         Err(_) => "8333".to_string(),
     };
     let known_node = "127.0.0.1:8333";
+
+    let blocks = get_blocks();
+
     let active_nodes_arc: Arc<RwLock<HashMap<net::SocketAddr, u64>>> =
         Arc::new(RwLock::new(HashMap::new()));
     let active_nodes_rw = Arc::clone(&active_nodes_arc);
@@ -162,6 +183,10 @@ fn start_node() {
 struct Message {
     command: [u8; 12],
     payload: Vec<u8>,
+}
+
+struct GetBlocks {
+    hash: [u8; 32],
 }
 
 struct Addr {
@@ -339,6 +364,20 @@ fn create_data_dir() -> (fs::File, fs::File) {
     return (wallet, blockdata);
 }
 
+fn fetch_blocks() -> Vec<Block> {
+    let (_, mut blockdata) = create_data_dir();
+    let mut length = [0u8; 2];
+    let blocks: Vec<Block> = match blockdata.read(&mut length) {
+        Ok(_) => {
+            let len = byteorder::BigEndian::read_u32(&length);
+            for _ in 0..len {}
+            Vec::new()
+        }
+        Err(_) => Vec::new(),
+    };
+    blocks
+}
+
 fn fetch_wallet() -> Wallet {
     let (mut wallet_file, _) = create_data_dir();
     let mut version = [0u8; 2];
@@ -462,26 +501,70 @@ fn address_from_pk(pk: [u8; 64]) -> String {
 }
 
 impl Block {
-    // let length = (3*4) + (32);
-    fn bytes_to_hash(&self) -> [u8; (2 + 4 + 32 + 8 + 8 + 32)] {
+    fn bytes_to_hash(&self) -> Vec<u8> {
         let index_u8a = u32_to_array_of_u8(self.index);
         let nonce_u8a = u64_to_array_of_u8(self.nonce);
         let timestamp_u8a = u64_to_array_of_u8(self.timestamp);
-        let mut out = [0; (2 + 4 + 32 + 8 + 8 + 32)];
-        let bytes = [
+        [
             &self.version[..],
             &index_u8a[..],
             &self.prev_hash[..],
             &nonce_u8a,
             &timestamp_u8a,
             &self.merkle_root,
-        ].concat();
-        out[..].clone_from_slice(&bytes[..]);
-        out
+        ].concat()
     }
 
     fn hash(&self) -> [u8; 32] {
         sha_256_bytes(&self.bytes_to_hash())
+    }
+
+    fn deserialize(buf: &[u8]) -> Block {
+        let mut offset = 0;
+        let mut version = [0; VERSION_SIZE];
+        version[..].copy_from_slice(&buf[offset..VERSION_SIZE]);
+        offset += VERSION_SIZE;
+        let index = array_of_u8_to_u32(&buf[offset..offset + INDEX_SIZE]);
+        offset += INDEX_SIZE;
+        let mut prev_hash = [0; HASH_SIZE];
+        prev_hash[..].copy_from_slice(&buf[offset..offset + HASH_SIZE]);
+        offset += HASH_SIZE;
+        let nonce = array_of_u8_to_u64(&buf[offset..offset + NONCE_SIZE]);
+        offset += NONCE_SIZE;
+        let timestamp = array_of_u8_to_u64(&buf[offset..offset + TS_SIZE]);
+        offset += TS_SIZE;
+        let mut merkle_root = [0; HASH_SIZE];
+        merkle_root[..].copy_from_slice(&buf[offset..offset + HASH_SIZE]);
+        offset += HASH_SIZE;
+        let tx_len = array_of_u8_to_u32(&buf[offset..offset + U32_SIZE]);
+        offset += U32_SIZE;
+        let mut transactions: Vec<Transaction> = Vec::new();
+        for _ in 0..tx_len {
+            let (tx, len) = Transaction::deserialize(&buf[offset..]);
+            offset += len;
+            transactions.push(tx);
+        }
+
+        Block {
+            version: version,
+            index: index,
+            prev_hash: prev_hash,
+            nonce: nonce,
+            timestamp: timestamp,
+            merkle_root: merkle_root,
+            transactions: transactions,
+        }
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        let mut block_bytes = self.bytes_to_hash();
+        block_bytes.extend_from_slice(&u32_to_array_of_u8(self.transactions
+            .len()
+            as u32));
+        for transaction in &self.transactions {
+            block_bytes.extend_from_slice(&transaction.serialize())
+        }
+        block_bytes
     }
 }
 
@@ -523,10 +606,9 @@ fn merkle_process_nodes(mut items: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
     return merkle_process_nodes(out);
 }
 
-impl TxIn {}
-
 impl TxIn {
     fn serialize(&self) -> Vec<u8> {
+        println!("{:?}", &self.previous_tx[..]);
         [
             &u32_to_array_of_u8(self.tx_index)[..],
             &self.previous_tx[..],
@@ -547,11 +629,47 @@ impl TxIn {
         let signature = result.serialize_compact(&secp);
         &self.signature[..].clone_from_slice(&signature);
     }
+
+    fn deserialize(buf: &[u8]) -> TxIn {
+        let mut offset = 0;
+        let tx_index = array_of_u8_to_u32(&buf[offset..offset + U32_SIZE]);
+        offset += U32_SIZE;
+        let mut previous_tx = [0; HASH_SIZE];
+        previous_tx[..].copy_from_slice(&buf[offset..offset + HASH_SIZE]);
+        offset += HASH_SIZE;
+        let amount = array_of_u8_to_u64(&buf[offset..offset + U64_SIZE]);
+        offset += U64_SIZE;
+        let mut pk = [0; PK_SIZE];
+        pk[..].copy_from_slice(&buf[offset..offset + PK_SIZE]);
+        offset += PK_SIZE;
+        let mut signature = [0; SIG_SIZE];
+        signature[..].copy_from_slice(&buf[offset..offset + SIG_SIZE]);
+        return TxIn {
+            tx_index: tx_index,
+            previous_tx: previous_tx,
+            amount: amount,
+            pk: pk,
+            signature: signature,
+        };
+    }
 }
 
 impl TxOut {
     fn serialize(&self) -> Vec<u8> {
         [&self.destination[..], &u64_to_array_of_u8(self.amount)[..]].concat()
+    }
+
+    fn deserialize(buf: &[u8]) -> TxOut {
+        let mut offset = 0;
+        let mut destination = [0; PK_SIZE];
+        println!("{:?}", &buf);
+        destination[..].copy_from_slice(&buf[offset..offset + PK_SIZE]);
+        offset += PK_SIZE;
+        let amount = array_of_u8_to_u64(&buf[offset..offset + U64_SIZE]);
+        return TxOut {
+            destination: destination,
+            amount: amount,
+        };
     }
 }
 
@@ -561,12 +679,13 @@ impl Transaction {
         let out_len = u32_to_array_of_u8(self.tx_in.len() as u32);
         let mut out: Vec<u8> = Vec::new();
         out.extend_from_slice(&in_len);
-        for tx_out in &self.tx_out {
-            out.append(&mut tx_out.serialize())
-        }
-        out.extend_from_slice(&out_len);
         for tx_in in &self.tx_in {
-            out.append(&mut tx_in.serialize())
+            out.extend_from_slice(&tx_in.serialize())
+        }
+        println!("{:?}", out);
+        out.extend_from_slice(&out_len);
+        for tx_out in &self.tx_out {
+            out.extend_from_slice(&tx_out.serialize())
         }
         out
     }
@@ -574,17 +693,41 @@ impl Transaction {
     fn hash(&self) -> [u8; 32] {
         sha_256_bytes(&self.serialize())
     }
+
+    fn deserialize(buf: &[u8]) -> (Transaction, usize) {
+        let mut offset = 0;
+        let mut tx_in: Vec<TxIn> = Vec::new();
+        let mut tx_out: Vec<TxOut> = Vec::new();
+        let tx_in_len = array_of_u8_to_u32(&buf[offset..offset + U32_SIZE]);
+        offset += U32_SIZE;
+        for _ in 0..tx_in_len {
+            tx_in.push(TxIn::deserialize(&buf[offset..]));
+            offset += TX_IN_SIZE;
+        }
+        let tx_out_len = array_of_u8_to_u32(&buf[offset..offset + U32_SIZE]);
+        offset += U32_SIZE;
+        for _ in 0..tx_out_len {
+            tx_out.push(TxOut::deserialize(&buf[offset..]));
+            offset += TX_OUT_SIZE;
+        }
+        (
+            Transaction {
+                tx_in: tx_in,
+                tx_out: tx_out,
+            },
+            offset,
+        )
+    }
 }
 
-// TODO: implement these are traits on u16/u32?
 fn u16_to_array_of_u8(x: u16) -> [u8; 2] {
     let b1: u8 = ((x >> 8) & 0xff) as u8;
     let b2: u8 = (x & 0xff) as u8;
     return [b1, b2];
 }
 
-fn array_of_u8_to_u32(x: [u8; 4]) -> u32 {
-    byteorder::BigEndian::read_u32(&x)
+fn array_of_u8_to_u32(x: &[u8]) -> u32 {
+    byteorder::BigEndian::read_u32(x)
 }
 
 fn u32_to_array_of_u8(x: u32) -> [u8; 4] {
@@ -593,8 +736,8 @@ fn u32_to_array_of_u8(x: u32) -> [u8; 4] {
     out
 }
 
-fn array_of_u8_to_u64(x: [u8; 8]) -> u64 {
-    byteorder::BigEndian::read_u64(&x)
+fn array_of_u8_to_u64(x: &[u8]) -> u64 {
+    byteorder::BigEndian::read_u64(x)
 }
 
 fn u64_to_array_of_u8(x: u64) -> [u8; 8] {
@@ -716,23 +859,7 @@ fn current_epoch() -> u64 {
 mod tests {
     use super::create_coinbase_transaction;
     use super::transactions_merkle_root;
-    use super::array_of_u8_to_u32;
-    use super::array_of_u8_to_u64;
-    use super::u32_to_array_of_u8;
-    use super::u64_to_array_of_u8;
     use super::{Address, Block, Transaction, TxIn, TxOut};
-
-    #[test]
-    fn int_transform_verify() {
-        assert_eq!(
-            array_of_u8_to_u32(u32_to_array_of_u8(567901234u32)),
-            567901234u32
-        );
-        assert_eq!(
-            array_of_u8_to_u64(u64_to_array_of_u8(567901234u64)),
-            567901234u64
-        );
-    }
 
     #[test]
     fn ascii_verify() {
@@ -747,23 +874,23 @@ mod tests {
     #[test]
     fn verify_genesis_block() {
         let _sk: [u8; 32] = [
-            37, 80, 185, 241, 1, 193, 142, 141, 126, 125, 221, 123, 78, 164,
-            164, 42, 171, 220, 35, 33, 155, 143, 151, 73, 28, 28, 252, 88, 65,
-            236, 190, 138,
+            78, 21, 143, 5, 35, 237, 232, 172, 88, 192, 203, 62, 139, 246, 119,
+            45, 190, 229, 92, 94, 143, 194, 190, 51, 152, 129, 179, 25, 213,
+            141, 199, 126,
         ];
         let hash: [u8; 32] = [
-            0, 0, 16, 209, 176, 119, 41, 220, 136, 124, 227, 200, 64, 253, 93,
-            164, 85, 175, 8, 94, 64, 63, 255, 201, 184, 200, 252, 123, 27, 81,
-            238, 88,
+            0, 0, 245, 152, 196, 151, 40, 119, 162, 151, 65, 221, 187, 19, 138,
+            67, 94, 158, 19, 94, 23, 205, 152, 189, 229, 50, 91, 189, 112, 1,
+            77, 223,
         ];
-        let nonce: u64 = 24930;
-        let ts: u64 = 1518313606;
+        let nonce: u64 = 61090;
+        let ts: u64 = 1518534873;
         let pk: [u8; 64] = [
-            114, 32, 241, 194, 225, 116, 46, 154, 46, 124, 62, 72, 64, 1, 153,
-            181, 137, 248, 106, 16, 108, 176, 187, 132, 110, 121, 201, 107, 90,
-            163, 62, 146, 96, 4, 58, 122, 27, 136, 3, 153, 206, 86, 217, 154,
-            220, 99, 114, 228, 88, 4, 90, 183, 40, 125, 218, 41, 151, 160, 203,
-            104, 254, 111, 79, 6,
+            131, 153, 89, 70, 234, 230, 140, 10, 87, 8, 195, 104, 112, 207,
+            162, 152, 3, 177, 70, 181, 118, 138, 178, 233, 67, 190, 138, 89,
+            35, 118, 74, 15, 101, 171, 220, 156, 132, 35, 153, 242, 221, 134,
+            21, 113, 224, 241, 218, 198, 195, 117, 117, 243, 235, 73, 155, 25,
+            210, 16, 127, 62, 123, 59, 191, 13,
         ];
         let transaction = create_coinbase_transaction(pk);
         let transactions = vec![transaction];
@@ -777,7 +904,21 @@ mod tests {
             timestamp: ts,
         };
         assert_eq!(hash, block.hash());
-        println!("{:?}", block.hash());
+
+        assert_eq!(
+            block.transactions[0].tx_in[0].serialize(),
+            TxIn::deserialize(&block.transactions[0].tx_in[0].serialize())
+                .serialize()
+        );
+
+        let (buf, len) =
+            Transaction::deserialize(&block.transactions[0].serialize());
+        assert_eq!(block.transactions[0].serialize(), buf.serialize());
+
+        assert_eq!(
+            block.serialize(),
+            Block::deserialize(&block.serialize()).serialize()
+        );
 
         // 25.0 bitcoin to new address
         let to_address = Address::new();
