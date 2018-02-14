@@ -46,6 +46,9 @@ fn main() {
                 println!("{}", "Creating new address");
                 create_new_address();
             }
+            "mine-genesis-block" => {
+                mine_genesis_block();
+            }
             "addresses" => {
                 println!("{}", "Your wallet addresses:");
                 list_addresses();
@@ -56,16 +59,8 @@ fn main() {
         println!(
             "{}",
             "Starting rustcoin node...\nAvailable commands: \n\tnew-address\n\taddresses");
-        let _block = mine_genesis_block();
-        // start_node();
+        start_node();
     }
-}
-
-fn get_blocks() -> Vec<Block> {
-    let out: Vec<Block> = Vec::new();
-    let (_, blockdata) = create_data_dir();
-
-    out
 }
 
 fn start_node() {
@@ -73,9 +68,18 @@ fn start_node() {
         Ok(port) => port,
         Err(_) => "8333".to_string(),
     };
+
+
+    // let known_node = "rustcoin:8333";
     let known_node = "127.0.0.1:8333";
 
-    let blocks = get_blocks();
+    println!("{}: {}", port, "Fetching blocks");
+    let mut blocks = fetch_blocks();
+    if blocks.len() == 0 {
+        println!("{}: {}", port, "No blocks found, writing genesis block.");
+        blocks.push(genesis_block());
+        write_blocks(&blocks);
+    }
 
     let active_nodes_arc: Arc<RwLock<HashMap<net::SocketAddr, u64>>> =
         Arc::new(RwLock::new(HashMap::new()));
@@ -92,7 +96,7 @@ fn start_node() {
         }
     }
 
-    let socket = net::UdpSocket::bind(format!("127.0.0.1:{}", port)).unwrap();
+    let socket = net::UdpSocket::bind(format!("0.0.0.0:{}", &port)).unwrap();
 
     println!("Broadcasting on {}", port);
 
@@ -110,7 +114,7 @@ fn start_node() {
         let active_nodes = active_nodes_rw.read().unwrap();
         for (node, _) in active_nodes.iter() {
             socket.send_to(&getaddr.serialize(), &node).unwrap();
-            println!("Sent getaddr to {}", &node);
+            println!("{}: Sent getaddr to {}", port, &node);
         }
     }
 
@@ -121,6 +125,7 @@ fn start_node() {
     // });
 
     // Scheduled task sender
+    let thread_port = String::from(port.as_ref());
     thread::spawn(move || {
         let active_nodes_rw = Arc::clone(&active_nodes_arc);
         let ping = Message {
@@ -128,10 +133,10 @@ fn start_node() {
             command: [0x70, 0x69, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
         };
         loop {
-            thread::sleep(time::Duration::from_millis(1000));
+            thread::sleep(time::Duration::from_millis(10000));
             let active_nodes = active_nodes_rw.read().unwrap();
             for (node, _) in active_nodes.iter() {
-                println!("Sent ping to {}", &node);
+                println!("{}: Sent ping to {}", thread_port, &node);
                 send_socket.send_to(&ping.serialize(), node).unwrap();
             }
         }
@@ -148,7 +153,7 @@ fn start_node() {
         }
         let (command, payload) = Message::deserialize(&buf);
         let command = String::from_utf8_lossy(command);
-        println!("Command \"{}\" from {}", command, src);
+        println!("{}: Command \"{}\" from {}", port, command, src);
         match command.as_ref() {
             "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
                 socket.send_to(&pong.serialize(), src).unwrap();
@@ -166,15 +171,17 @@ fn start_node() {
                         // Don't add me
                         if socket.local_addr().unwrap() != address.address {
                             // TODO: take the freshest timestamp
-                            active_nodes.insert(address.address, address.ts);
+                            println!("{}: Adding node address {}", port, address.address);
+                            active_nodes.insert(address.address
+                                , address.ts);
                         }
                     }
-                    println!("{:?}", &buf[16..(32 + 16)]);
+
                 }
             }
             "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {}
             &_ => {
-                println!("No match for command {}", command);
+                println!("{}: No match for command {}", port, command);
             }
         }
     }
@@ -192,6 +199,9 @@ struct GetBlocks {
 struct Addr {
     address: net::SocketAddr,
     ts: u64,
+}
+struct Ping {
+    address: net::SocketAddr,
 }
 
 impl Addr {
@@ -276,7 +286,6 @@ impl Message {
             &buf[MAGIC_NUMBER_SIZE + COMMAND_SIZE
                      ..MAGIC_NUMBER_SIZE + COMMAND_SIZE + u32_len],
         ) as usize;
-        println!("{:?}", len);
         let header_offset =
             MAGIC_NUMBER_SIZE + COMMAND_SIZE + u32_len + checksum_len;
         let payload = &buf[header_offset..header_offset + len];
@@ -366,16 +375,36 @@ fn create_data_dir() -> (fs::File, fs::File) {
 
 fn fetch_blocks() -> Vec<Block> {
     let (_, mut blockdata) = create_data_dir();
-    let mut length = [0u8; 2];
+    let mut length = [0u8; U32_SIZE];
     let blocks: Vec<Block> = match blockdata.read(&mut length) {
         Ok(_) => {
             let len = byteorder::BigEndian::read_u32(&length);
-            for _ in 0..len {}
-            Vec::new()
+            let mut blockbytes: Vec<u8> = Vec::new();
+            blockdata.read_to_end(&mut blockbytes).unwrap();
+            let mut blocks: Vec<Block> = Vec::new();
+            for _ in 0..len {
+                let block = Block::deserialize(&mut blockbytes);
+                blocks.push(block);
+            }
+            blocks
         }
         Err(_) => Vec::new(),
     };
     blocks
+}
+
+fn write_blocks(blocks: &Vec<Block>) {
+    let mut blockdata = fs::OpenOptions::new()
+        .write(true)
+        .open(&rustcoin_dir().join("blockdata.dat"))
+        .unwrap();
+    let mut to_write: Vec<u8> = Vec::new();
+    to_write.extend_from_slice(&u32_to_array_of_u8(blocks.len() as u32));
+    for block in blocks {
+        to_write.extend(block.serialize());
+    }
+    blockdata.write_all(&to_write).unwrap();
+    blockdata.sync_data().unwrap();
 }
 
 fn fetch_wallet() -> Wallet {
@@ -468,9 +497,7 @@ impl Wallet {
         out.push(self.version[0]);
         out.push(self.version[1]);
         let length = self.addresses.len() as u8;
-        println!("{:?}", length);
         out.push(length);
-        println!("{:?}", out);
         for i in 0..length {
             let index = i as usize;
             let address = self.addresses[index].serialize();
@@ -478,7 +505,6 @@ impl Wallet {
                 out.push(address[i]);
             }
         }
-        println!("{:?}", out);
         out
     }
 }
@@ -519,7 +545,7 @@ impl Block {
         sha_256_bytes(&self.bytes_to_hash())
     }
 
-    fn deserialize(buf: &[u8]) -> Block {
+    fn deserialize(buf: &mut [u8]) -> Block {
         let mut offset = 0;
         let mut version = [0; VERSION_SIZE];
         version[..].copy_from_slice(&buf[offset..VERSION_SIZE]);
@@ -539,10 +565,11 @@ impl Block {
         let tx_len = array_of_u8_to_u32(&buf[offset..offset + U32_SIZE]);
         offset += U32_SIZE;
         let mut transactions: Vec<Transaction> = Vec::new();
+
+        let mut buf = &mut buf[offset..];
+
         for _ in 0..tx_len {
-            let (tx, len) = Transaction::deserialize(&buf[offset..]);
-            offset += len;
-            transactions.push(tx);
+            transactions.push(Transaction::deserialize(&mut buf));
         }
 
         Block {
@@ -585,6 +612,7 @@ fn merkle(items: Vec<[u8; 32]>) -> [u8; 32] {
     };
     sha_256_bytes(&sha_256_bytes(&items[0]))
 }
+
 fn merkle_process_nodes(mut items: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
     let mut out: Vec<[u8; 32]> = Vec::new();
     if items.len() % 2 == 1 {
@@ -608,7 +636,6 @@ fn merkle_process_nodes(mut items: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
 
 impl TxIn {
     fn serialize(&self) -> Vec<u8> {
-        println!("{:?}", &self.previous_tx[..]);
         [
             &u32_to_array_of_u8(self.tx_index)[..],
             &self.previous_tx[..],
@@ -662,7 +689,6 @@ impl TxOut {
     fn deserialize(buf: &[u8]) -> TxOut {
         let mut offset = 0;
         let mut destination = [0; PK_SIZE];
-        println!("{:?}", &buf);
         destination[..].copy_from_slice(&buf[offset..offset + PK_SIZE]);
         offset += PK_SIZE;
         let amount = array_of_u8_to_u64(&buf[offset..offset + U64_SIZE]);
@@ -682,7 +708,6 @@ impl Transaction {
         for tx_in in &self.tx_in {
             out.extend_from_slice(&tx_in.serialize())
         }
-        println!("{:?}", out);
         out.extend_from_slice(&out_len);
         for tx_out in &self.tx_out {
             out.extend_from_slice(&tx_out.serialize())
@@ -694,7 +719,7 @@ impl Transaction {
         sha_256_bytes(&self.serialize())
     }
 
-    fn deserialize(buf: &[u8]) -> (Transaction, usize) {
+    fn deserialize(buf: &mut [u8]) -> Transaction {
         let mut offset = 0;
         let mut tx_in: Vec<TxIn> = Vec::new();
         let mut tx_out: Vec<TxOut> = Vec::new();
@@ -710,13 +735,11 @@ impl Transaction {
             tx_out.push(TxOut::deserialize(&buf[offset..]));
             offset += TX_OUT_SIZE;
         }
-        (
-            Transaction {
-                tx_in: tx_in,
-                tx_out: tx_out,
-            },
-            offset,
-        )
+        let buf = &mut buf[offset..];
+        Transaction {
+            tx_in: tx_in,
+            tx_out: tx_out,
+        }
     }
 }
 
@@ -855,10 +878,35 @@ fn current_epoch() -> u64 {
     return since_the_epoch.as_secs();
 }
 
+fn genesis_block() -> Block {
+    let nonce: u64 = 61090;
+    let ts: u64 = 1518534873;
+    let pk: [u8; 64] = [
+        131, 153, 89, 70, 234, 230, 140, 10, 87, 8, 195, 104, 112, 207,
+        162, 152, 3, 177, 70, 181, 118, 138, 178, 233, 67, 190, 138, 89,
+        35, 118, 74, 15, 101, 171, 220, 156, 132, 35, 153, 242, 221, 134,
+        21, 113, 224, 241, 218, 198, 195, 117, 117, 243, 235, 73, 155, 25,
+        210, 16, 127, 62, 123, 59, 191, 13,
+    ];
+    let transaction = create_coinbase_transaction(pk);
+    let transactions = vec![transaction];
+    let block = Block {
+        index: 0,
+        version: [0; 2],
+        merkle_root: transactions_merkle_root(&transactions),
+        prev_hash: [0; 32],
+        transactions: transactions,
+        nonce: nonce,
+        timestamp: ts,
+    };
+    block
+}
+
 #[cfg(test)]
 mod tests {
     use super::create_coinbase_transaction;
     use super::transactions_merkle_root;
+    use super::genesis_block;
     use super::{Address, Block, Transaction, TxIn, TxOut};
 
     #[test]
@@ -883,26 +931,7 @@ mod tests {
             67, 94, 158, 19, 94, 23, 205, 152, 189, 229, 50, 91, 189, 112, 1,
             77, 223,
         ];
-        let nonce: u64 = 61090;
-        let ts: u64 = 1518534873;
-        let pk: [u8; 64] = [
-            131, 153, 89, 70, 234, 230, 140, 10, 87, 8, 195, 104, 112, 207,
-            162, 152, 3, 177, 70, 181, 118, 138, 178, 233, 67, 190, 138, 89,
-            35, 118, 74, 15, 101, 171, 220, 156, 132, 35, 153, 242, 221, 134,
-            21, 113, 224, 241, 218, 198, 195, 117, 117, 243, 235, 73, 155, 25,
-            210, 16, 127, 62, 123, 59, 191, 13,
-        ];
-        let transaction = create_coinbase_transaction(pk);
-        let transactions = vec![transaction];
-        let block = Block {
-            index: 0,
-            version: [0; 2],
-            merkle_root: transactions_merkle_root(&transactions),
-            prev_hash: [0; 32],
-            transactions: transactions,
-            nonce: nonce,
-            timestamp: ts,
-        };
+        let block = genesis_block();
         assert_eq!(hash, block.hash());
 
         assert_eq!(
@@ -911,13 +940,16 @@ mod tests {
                 .serialize()
         );
 
-        let (buf, len) =
-            Transaction::deserialize(&block.transactions[0].serialize());
-        assert_eq!(block.transactions[0].serialize(), buf.serialize());
+        let mut serialized_transaction = block.transactions[0].serialize();
+        assert_eq!(
+            block.transactions[0].serialize(),
+            Transaction::deserialize(&mut serialized_transaction).serialize()
+        );
 
+        let mut serialized_block = block.serialize();
         assert_eq!(
             block.serialize(),
-            Block::deserialize(&block.serialize()).serialize()
+            Block::deserialize(&mut serialized_block).serialize()
         );
 
         // 25.0 bitcoin to new address

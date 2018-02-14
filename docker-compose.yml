@@ -2,12 +2,72 @@ version: '3'
 volumes:
   blockdata_dir:
     external: true
+  cargo_files:
+    external: true
 
 services:
   rustcoin:
     build: ./rustcoin
+    environment:
+      - "CARGO_HOME=/opt/cargo"
     volumes: 
       - ./rustcoin:/opt/rustcoin
       - blockdata_dir:/root/.rustcoin/
-    ports:
-      - "8333:8333/udp"
+      - cargo_files:/opt/cargo
+    # ports:
+    #   - "8333:8333/udp"
+    # networks:
+    #   vpcbr:
+    #     ipv4_address: 10.5.0.3
+#   rustcoin2:
+#     build: ./rustcoin
+#     environment:
+#       - "CARGO_HOME=/opt/cargo"
+#       - "PORT=8334"
+#     volumes: 
+#       - ./rustcoin:/opt/rustcoin
+#       - cargo_files:/opt/cargo
+#     ports:
+#       - "8334:8334/udp"
+#     networks:
+#       vpcbr:
+#         ipv4_address: 10.5.0.4
+#     depends_on:
+#       - "rustcoin"
+#   rustcoin3:
+#     build: ./rustcoin
+#     environment:
+#       - "CARGO_HOME=/opt/cargo"
+#       - "PORT=8335"
+#     volumes: 
+#       - ./rustcoin:/opt/rustcoin
+#       - cargo_files:/opt/cargo
+#     ports:
+#       - "8335:8335/udp"
+#     networks:
+#       vpcbr:
+#         ipv4_address: 10.5.0.5
+#     depends_on:
+#       - "rustcoin"
+#   rustcoin4:
+#     build: ./rustcoin
+#     environment:
+#       - "CARGO_HOME=/opt/cargo"
+#       - "PORT=8336"
+#     volumes: 
+#       - ./rustcoin:/opt/rustcoin
+#       - cargo_files:/opt/cargo
+#     ports:
+#       - "8336:8336/udp"
+#     networks:
+#       vpcbr:
+#         ipv4_address: 10.5.0.6
+#     depends_on:
+#       - "rustcoin"
+
+# networks:
+#   vpcbr:
+#     driver: bridge
+#     ipam:
+#      config:
+#        - subnet: 10.5.0.0/16
