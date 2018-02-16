@@ -146,12 +146,12 @@ fn start_node() {
     loop {
         // 2mb, largest message size
         let mut buf = [0; 2_000_000];
-        let (_amt, src) = socket.recv_from(&mut buf).unwrap();
+        let (amt, src) = socket.recv_from(&mut buf).unwrap();
         {
             let mut active_nodes = active_nodes_rw.write().unwrap();
             active_nodes.insert(src, current_epoch());
         }
-        let mut message = Message::deserialize(&mut buf.to_vec());
+        let mut message = Message::deserialize(&mut buf[..amt].to_vec());
         let command = String::from_utf8_lossy(&message.command);
         println!("{}: Command \"{}\" from {}", port, command, src);
         match command.as_ref() {
@@ -213,17 +213,15 @@ impl Addr {
             command: addr_ascii,
             payload: addrs,
         };
-        addr.payload
-            .extend_from_slice(&u16_to_array_of_u8(active_nodes.len() as u16));
+        (active_nodes.len() as u16).serialize(&mut addr.payload);
         for (sock, ts) in active_nodes {
             let ip_octets = match sock.ip() {
                 net::IpAddr::V4(ip) => ip.octets(),
                 net::IpAddr::V6(_) => continue,
             };
             addr.payload.extend_from_slice(&ip_octets);
-            addr.payload
-                .extend_from_slice(&u16_to_array_of_u8(sock.port()));
-            addr.payload.extend_from_slice(&u64_to_array_of_u8(*ts));
+            sock.port().serialize(&mut addr.payload); 
+            ts.serialize(&mut addr.payload);
         }
         addr
     }
@@ -252,11 +250,9 @@ impl Message {
     fn serialize(&self) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::new();
         // magic numbers
-        out.extend_from_slice(&[0xF9, 0xBE, 0xB4, 0xD9]);
-        // command
-        out.extend_from_slice(&self.command);
-        // length
-        out.extend_from_slice(&u32_to_array_of_u8(self.payload.len() as u32));
+        [0xF9, 0xBE, 0xB4, 0xD9].serialize(&mut out);
+        self.command.serialize(&mut out);
+        (self.payload.len() as u32).serialize(&mut out);
         // checksum
         out.extend_from_slice(&sha_256_bytes(&sha_256_bytes(&self.payload))
             [..4]
@@ -382,7 +378,7 @@ fn write_blocks(blocks: &Vec<Block>) {
         .open(&rustcoin_dir().join("blockdata.dat"))
         .unwrap();
     let mut to_write: Vec<u8> = Vec::new();
-    to_write.extend_from_slice(&u32_to_array_of_u8(blocks.len() as u32));
+    (blocks.len() as u32).serialize(&mut to_write);
     for block in blocks {
         to_write.extend(block.serialize());
     }
@@ -511,17 +507,14 @@ fn address_from_pk(pk: [u8; 64]) -> String {
 
 impl Block {
     fn bytes_to_hash(&self) -> Vec<u8> {
-        let index_u8a = u32_to_array_of_u8(self.index);
-        let nonce_u8a = u64_to_array_of_u8(self.nonce);
-        let timestamp_u8a = u64_to_array_of_u8(self.timestamp);
-        [
-            &self.version[..],
-            &index_u8a[..],
-            &self.prev_hash[..],
-            &nonce_u8a,
-            &timestamp_u8a,
-            &self.merkle_root,
-        ].concat()
+        let mut out: Vec<u8> = Vec::new();
+        self.version.serialize(&mut out);
+        self.index.serialize(&mut out);
+        self.prev_hash.serialize(&mut out);
+        self.nonce.serialize(&mut out);
+        self.timestamp.serialize(&mut out);
+        self.merkle_root.serialize(&mut out);
+        out
     }
 
     fn hash(&self) -> [u8; 32] {
@@ -555,9 +548,7 @@ impl Block {
 
     fn serialize(&self) -> Vec<u8> {
         let mut block_bytes = self.bytes_to_hash();
-        block_bytes.extend_from_slice(&u32_to_array_of_u8(self.transactions
-            .len()
-            as u32));
+        (self.transactions.len() as u32).serialize(&mut block_bytes);
         for transaction in &self.transactions {
             block_bytes.extend_from_slice(&transaction.serialize())
         }
@@ -606,13 +597,13 @@ fn merkle_process_nodes(mut items: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
 
 impl TxIn {
     fn serialize(&self) -> Vec<u8> {
-        [
-            &u32_to_array_of_u8(self.tx_index)[..],
-            &self.previous_tx[..],
-            &u64_to_array_of_u8(self.amount)[..],
-            &self.pk[..],
-            &self.signature[..],
-        ].concat()
+        let mut out: Vec<u8> = Vec::new();
+        self.tx_index.serialize(&mut out);
+        self.previous_tx.serialize(&mut out);
+        self.amount.serialize(&mut out);
+        self.pk.serialize(&mut out);
+        self.signature.serialize(&mut out);
+        out
     }
 
     fn sign(&mut self, sk: &[u8; 32]) {
@@ -645,7 +636,10 @@ impl TxIn {
 
 impl TxOut {
     fn serialize(&self) -> Vec<u8> {
-        [&self.destination[..], &u64_to_array_of_u8(self.amount)[..]].concat()
+        let mut out: Vec<u8> = Vec::new();
+        self.destination.serialize(&mut out);
+        self.amount.serialize(&mut out);
+        out
     }
 
     fn deserialize(buf: &mut Vec<u8>) -> TxOut {
@@ -660,14 +654,12 @@ impl TxOut {
 
 impl Transaction {
     fn serialize(&self) -> Vec<u8> {
-        let in_len = u32_to_array_of_u8(self.tx_in.len() as u32);
-        let out_len = u32_to_array_of_u8(self.tx_out.len() as u32);
         let mut out: Vec<u8> = Vec::new();
-        out.extend_from_slice(&in_len);
+        (self.tx_in.len() as u32).serialize(&mut out);
         for tx_in in &self.tx_in {
             out.extend_from_slice(&tx_in.serialize())
         }
-        out.extend_from_slice(&out_len);
+        (self.tx_out.len() as u32).serialize(&mut out);
         for tx_out in &self.tx_out {
             out.extend_from_slice(&tx_out.serialize())
         }
@@ -694,32 +686,6 @@ impl Transaction {
             tx_out: tx_out,
         }
     }
-}
-
-fn u16_to_array_of_u8(x: u16) -> [u8; 2] {
-    let b1: u8 = ((x >> 8) & 0xff) as u8;
-    let b2: u8 = (x & 0xff) as u8;
-    return [b1, b2];
-}
-
-fn array_of_u8_to_u32(x: &[u8]) -> u32 {
-    byteorder::BigEndian::read_u32(x)
-}
-
-fn u32_to_array_of_u8(x: u32) -> [u8; 4] {
-    let mut out = [0; 4];
-    byteorder::BigEndian::write_u32(&mut out, x);
-    out
-}
-
-fn array_of_u8_to_u64(x: &[u8]) -> u64 {
-    byteorder::BigEndian::read_u64(x)
-}
-
-fn u64_to_array_of_u8(x: u64) -> [u8; 8] {
-    let mut out = [0; 8];
-    byteorder::BigEndian::write_u64(&mut out, x);
-    out
 }
 
 fn create_coinbase_transaction(destination: [u8; 64]) -> Transaction {
