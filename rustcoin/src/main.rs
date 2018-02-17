@@ -80,15 +80,11 @@ fn start_node() {
         blocks.push(genesis_block());
         write_blocks(&blocks);
     }
+    let last_hash = blocks[blocks.len()-1].hash();
 
-    let active_nodes_arc: Arc<RwLock<HashMap<net::SocketAddr, u64>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-    let active_nodes_rw = Arc::clone(&active_nodes_arc);
-
+    let mut active_nodes: HashMap<net::SocketAddr, u64> = HashMap::new();
     if port != "8333".to_string() {
         {
-            let mut active_nodes = active_nodes_rw.write().unwrap();
-
             active_nodes.insert(
                 known_node.to_socket_addrs().unwrap().next().unwrap(),
                 0,
@@ -97,10 +93,15 @@ fn start_node() {
     }
 
     let socket = net::UdpSocket::bind(format!("0.0.0.0:{}", &port)).unwrap();
+    let duration: Option<time::Duration> = Some(time::Duration::new(0, 1000));
+    socket.set_read_timeout(duration).unwrap();
 
     println!("Broadcasting on {}", port);
-
     let pong = Message {
+        payload: Vec::new(),
+        command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+    let ping = Message {
         payload: Vec::new(),
         command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
     };
@@ -108,82 +109,67 @@ fn start_node() {
         payload: Vec::new(),
         command: [0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0],
     };
-    // let (message_sender, message_receiver) = mpsc::channel::<ToSend>();
+    let getblocks = Message {
+        payload: last_hash.to_vec(),
+        command: [0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0],
+    };
 
-    {
-        let active_nodes = active_nodes_rw.read().unwrap();
-        for (node, _) in active_nodes.iter() {
-            socket.send_to(&getaddr.serialize(), &node).unwrap();
-            println!("{}: Sent getaddr to {}", port, &node);
-        }
+    // ask all active nodes for addresses
+    for (node, _) in active_nodes.iter() {
+        socket.send_to(&getaddr.serialize(), &node).unwrap();
+        println!("{}: Sent getaddr to {}", port, &node);
     }
 
-    let send_socket = socket.try_clone().unwrap();
-    // // Message sender
-    // thread::spawn(move || {
-
-    // });
-
-    // Scheduled task sender
-    let thread_port = String::from(port.as_ref());
-    thread::spawn(move || {
-        let active_nodes_rw = Arc::clone(&active_nodes_arc);
-        let ping = Message {
-            payload: Vec::new(),
-            command: [0x70, 0x69, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
-        };
-        loop {
-            thread::sleep(time::Duration::from_millis(10000));
-            let active_nodes = active_nodes_rw.read().unwrap();
-            for (node, _) in active_nodes.iter() {
-                println!("{}: Sent ping to {}", thread_port, &node);
-                send_socket.send_to(&ping.serialize(), node).unwrap();
-            }
-        }
-    });
-
     // Message receiver
+    let start_time = time::Instant::now();
+    let mut last_sent_pings = start_time;
     loop {
         // 2mb, largest message size
         let mut buf = [0; 2_000_000];
-        let (amt, src) = socket.recv_from(&mut buf).unwrap();
-        {
-            let mut active_nodes = active_nodes_rw.write().unwrap();
-            active_nodes.insert(src, current_epoch());
-        }
-        let mut message = Message::deserialize(&mut buf[..amt].to_vec());
-        let command = String::from_utf8_lossy(&message.command);
-        println!("{}: Command \"{}\" from {}", port, command, src);
-        match command.as_ref() {
-            "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                socket.send_to(&pong.serialize(), src).unwrap();
-            }
-            "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                let active_nodes = active_nodes_rw.read().unwrap();
-                let addr = Addr::serialize(&active_nodes);
-                socket.send_to(&addr.serialize(), src).unwrap();
-            }
-            "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                {
-                    let mut active_nodes = active_nodes_rw.write().unwrap();
-                    let addresses = Addr::deserialize(&mut message.payload);
-                    for address in &addresses {
-                        // Don't add me
-                        if socket.local_addr().unwrap() != address.address {
-                            // TODO: take the freshest timestamp
-                            println!(
-                                "{}: Adding node address {}",
-                                port, address.address
-                            );
-                            active_nodes.insert(address.address, address.ts);
+        match socket.recv_from(&mut buf) {
+            Ok((amt, src)) => {
+                active_nodes.insert(src, current_epoch());
+                let mut message = Message::deserialize(&mut buf[..amt].to_vec());
+                let command = String::from_utf8_lossy(&message.command);
+                println!("{}: Command \"{}\" from {}", port, command, src);
+                match command.as_ref() {
+                    "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                        socket.send_to(&pong.serialize(), src).unwrap();
+                    }
+                    "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                        let addr = Addr::serialize(&active_nodes);
+                        socket.send_to(&addr.serialize(), src).unwrap();
+                    }
+                    "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                        let addresses = Addr::deserialize(&mut message.payload);
+                        for address in &addresses {
+                            // Don't add me
+                            if socket.local_addr().unwrap() != address.address {
+                                // TODO: take the freshest timestamp
+                                println!(
+                                    "{}: Adding node address {}",
+                                    port, address.address
+                                );
+                                active_nodes.insert(address.address, address.ts);
+                            }
                         }
+                    }
+                    "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {}
+                    &_ => {
+                        println!("{}: No match for command {}", port, command);
                     }
                 }
             }
-            "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {}
-            &_ => {
-                println!("{}: No match for command {}", port, command);
+            Err(_err) => {
+                // println!("{:?}", err);
             }
+        }
+        if last_sent_pings.elapsed().as_secs() > 5 {
+            for (node, _) in active_nodes.iter() {
+                println!("{}: Sent ping to {}", port, &node);
+                socket.send_to(&ping.serialize(), node).unwrap();
+            }            
+            last_sent_pings = time::Instant::now();
         }
     }
 }
@@ -193,16 +179,9 @@ struct Message {
     payload: Vec<u8>,
 }
 
-struct GetBlocks {
-    hash: [u8; 32],
-}
-
 struct Addr {
     address: net::SocketAddr,
     ts: u64,
-}
-struct Ping {
-    address: net::SocketAddr,
 }
 
 impl Addr {
