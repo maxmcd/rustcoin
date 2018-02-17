@@ -1,4 +1,3 @@
-use rc::constants;
 use rc::filesystem::{fetch_blocks, write_blocks};
 use rc::blockdata::{Block, Address, Transaction};
 use rc::blockdata::{MerkleRoot};
@@ -12,50 +11,66 @@ use std::net::ToSocketAddrs;
 use std::{env, net, thread, time};
 use std::sync::mpsc;
 
-pub fn start_node() {
-    let port = match env::var("PORT") {
-        Ok(port) => port,
-        Err(_) => "8333".to_string(),
-    };
+const GETBLOCKS_CMD: [u8; 12] = [0x67, 0x65, 0x74, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x73, 0, 0, 0];
+const GETADDR_CMD: [u8; 12] = [0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0];
+const PING_CMD: [u8; 12] = [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0];
 
-    // let known_node = "rustcoin:8333";
-    let known_node = "127.0.0.1:8333";
+struct NetworkState {
+    port: String,
+    socket: net::UdpSocket,
+    active_nodes: HashMap<net::SocketAddr, u64>,
+    blocks: Vec<Block>,
+    step: usize,
+}
 
-    println!("{}: {}", port, "Fetching blocks");
-    let mut blocks = fetch_blocks();
-    if blocks.len() == 0 {
-        println!("{}: {}", port, "No blocks found, writing genesis block.");
-        blocks.push(Block::genesis_block());
-        write_blocks(&blocks);
-    }
-    let last_hash = blocks[blocks.len() - 1].hash();
+impl NetworkState {
+    fn new() -> NetworkState {
+        let known_node = "127.0.0.1:8333";
+        let port = match env::var("PORT") {
+            Ok(port) => port,
+            Err(_) => "8333".to_string(),
+        };
 
-    let mut active_nodes: HashMap<net::SocketAddr, u64> = HashMap::new();
-    if port != "8333".to_string() {
-        {
-            active_nodes.insert(
-                known_node.to_socket_addrs().unwrap().next().unwrap(),
-                0,
-            );
+        let mut ns = NetworkState {
+            socket: net::UdpSocket::bind(format!("0.0.0.0:{}", &port)).unwrap(),
+            port: port,
+            active_nodes: HashMap::new(),
+            blocks: fetch_blocks(),
+            step: 1,
+        };
+        let duration: Option<time::Duration> = Some(time::Duration::new(0, 1000));
+        ns.socket.set_read_timeout(duration).unwrap();
+
+        if ns.port != "8333".to_string() {
+            {
+                ns.active_nodes.insert(
+                    known_node.to_socket_addrs().unwrap().next().unwrap(),
+                    0,
+                );
+            }
         }
+        ns
     }
+}
 
-    let socket = net::UdpSocket::bind(format!("0.0.0.0:{}", &port)).unwrap();
-    let duration: Option<time::Duration> = Some(time::Duration::new(0, 1000));
-    socket.set_read_timeout(duration).unwrap();
+pub fn start_node() {
 
-    println!("Broadcasting on {}", port);
-    let ping = Message {
-        payload: Vec::new(),
-        command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
-    };
-    let getaddr = Message {
-        payload: Vec::new(),
-        command: constants::GETADDR_CMD,
-    };
+    let mut ns = NetworkState::new();
+    
+    println!("{}: {}", ns.port, "Fetching blocks");
+    if ns.blocks.len() == 0 {
+        println!("{}: {}", ns.port, "No blocks found, writing genesis block.");
+        ns.blocks.push(Block::genesis_block());
+        write_blocks(&ns.blocks);
+    }
+    let last_hash = ns.blocks[ns.blocks.len() - 1].hash();
+
+    println!("Broadcasting on {}", ns.port);
+    let ping = Message::from_command(PING_CMD);
+    let getaddr = Message::from_command(GETADDR_CMD);
     let mut getblocks = Message {
         payload: last_hash.to_vec(),
-        command: constants::GETBLOCKS_CMD,
+        command: GETBLOCKS_CMD,
     };
 
     // mine
@@ -115,9 +130,9 @@ pub fn start_node() {
     });
 
     // ask all active nodes for addresses
-    for (node, _) in active_nodes.iter() {
-        socket.send_to(&getaddr.serialize(), &node).unwrap();
-        println!("{}: Sent getaddr to {}", port, &node);
+    for (node, _) in ns.active_nodes.iter() {
+        ns.socket.send_to(&getaddr.serialize(), &node).unwrap();
+        println!("{}: Sent getaddr to {}", ns.port, &node);
     }
 
     // Message receiver
@@ -132,18 +147,18 @@ pub fn start_node() {
     loop {
         // 2mb, largest message size
         let mut buf = [0; 2_000_000];
-        match socket.recv_from(&mut buf) {
+        match ns.socket.recv_from(&mut buf) {
             Ok((amt, src)) => {
                 let mut message =
                     Message::deserialize(&mut buf[..amt].to_vec());
-                active_nodes.insert(src, current_epoch());
+                ns.active_nodes.insert(src, current_epoch());
                 stage = match_message(
                     src,
-                    &socket,
+                    &ns.socket,
                     &mut message,
-                    &mut active_nodes,
-                    &blocks,
-                    &port,
+                    &mut ns.active_nodes,
+                    &ns.blocks,
+                    &ns.port,
                     stage,
                 );
             }
@@ -170,10 +185,10 @@ pub fn start_node() {
                     kind: 1,
                     hash: block.hash(),
                 });
-                blocks.push(block);
-                for (node, _) in active_nodes.iter() {
-                    println!("{}: Sent new block to {}", port, &node);
-                    socket.send_to(&inv.serialize(), node).unwrap();
+                ns.blocks.push(block);
+                for (node, _) in ns.active_nodes.iter() {
+                    println!("{}: Sent new block to {}", ns.port, &node);
+                    ns.socket.send_to(&inv.serialize(), node).unwrap();
                 }
             }
             Err(err) => {
@@ -187,24 +202,24 @@ pub fn start_node() {
         }
 
         if stage == 2usize && last_sent_getblocks.elapsed().as_secs() > 10 {
-            let last_hash = blocks[blocks.len() - 1].hash();
+            let last_hash = ns.blocks[ns.blocks.len() - 1].hash();
             getblocks.payload = last_hash.to_vec();
-            for (node, _) in active_nodes.iter() {
-                println!("{}: Sent getblocks to {}", port, &node);
-                socket.send_to(&getblocks.serialize(), node).unwrap();
+            for (node, _) in ns.active_nodes.iter() {
+                println!("{}: Sent getblocks to {}", ns.port, &node);
+                ns.socket.send_to(&getblocks.serialize(), node).unwrap();
             }
             last_sent_getblocks = time::Instant::now();
         }
         if last_sent_pings.elapsed().as_secs() > 10 {
             if stage == 1usize {
-                for (node, _) in active_nodes.iter() {
-                    socket.send_to(&getaddr.serialize(), &node).unwrap();
-                    println!("{}: Sent getaddr to {}", port, &node);
+                for (node, _) in ns.active_nodes.iter() {
+                    ns.socket.send_to(&getaddr.serialize(), &node).unwrap();
+                    println!("{}: Sent getaddr to {}", ns.port, &node);
                 }
             }
-            for (node, _) in active_nodes.iter() {
-                println!("{}: Sent ping to {}", port, &node);
-                socket.send_to(&ping.serialize(), node).unwrap();
+            for (node, _) in ns.active_nodes.iter() {
+                println!("{}: Sent ping to {}", ns.port, &node);
+                ns.socket.send_to(&ping.serialize(), node).unwrap();
             }
             last_sent_pings = time::Instant::now();
         }
@@ -379,6 +394,13 @@ struct InvVector {
 }
 
 impl Message {
+    fn from_command(command: [u8; 12]) -> Message {
+        Message {
+            payload: Vec::new(),
+            command: command,
+        }
+    }
+
     fn serialize(&self) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::new();
         // magic numbers
