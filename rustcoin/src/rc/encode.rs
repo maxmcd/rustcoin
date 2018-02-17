@@ -1,4 +1,3 @@
-extern crate byteorder;
 use byteorder::{BigEndian, ByteOrder};
 
 fn extend_vec(vec: &mut Vec<u8>, len: usize) {
