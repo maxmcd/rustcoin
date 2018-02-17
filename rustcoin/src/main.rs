@@ -19,21 +19,11 @@ use secp256k1::key::SecretKey;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
-use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs, net, thread, time};
 
-const MAGIC_NUMBER_SIZE: usize = 4;
-const COMMAND_SIZE: usize = 12;
-const VERSION_SIZE: usize = 2;
-const INDEX_SIZE: usize = 4;
 const U32_SIZE: usize = 4;
-const U64_SIZE: usize = 8;
-const NONCE_SIZE: usize = 8;
-const TS_SIZE: usize = 8;
 const HASH_SIZE: usize = 32;
-const TX_IN_SIZE: usize = (4 + 32 + 8 + 64 + 64);
-const TX_OUT_SIZE: usize = (64 + 8);
 const PK_SIZE: usize = 64;
 const SIG_SIZE: usize = 64;
 
@@ -80,7 +70,7 @@ fn start_node() {
         blocks.push(genesis_block());
         write_blocks(&blocks);
     }
-    let last_hash = blocks[blocks.len()-1].hash();
+    let last_hash = blocks[blocks.len() - 1].hash();
 
     let mut active_nodes: HashMap<net::SocketAddr, u64> = HashMap::new();
     if port != "8333".to_string() {
@@ -97,10 +87,6 @@ fn start_node() {
     socket.set_read_timeout(duration).unwrap();
 
     println!("Broadcasting on {}", port);
-    let pong = Message {
-        payload: Vec::new(),
-        command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
-    };
     let ping = Message {
         payload: Vec::new(),
         command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -109,9 +95,11 @@ fn start_node() {
         payload: Vec::new(),
         command: [0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0],
     };
-    let getblocks = Message {
+    let mut getblocks = Message {
         payload: last_hash.to_vec(),
-        command: [0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0],
+        command: [
+            0x67, 0x65, 0x74, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x73, 0, 0, 0
+        ],
     };
 
     // ask all active nodes for addresses
@@ -120,56 +108,121 @@ fn start_node() {
         println!("{}: Sent getaddr to {}", port, &node);
     }
 
+    // mine
+    thread::spawn(move || {});
+
     // Message receiver
     let start_time = time::Instant::now();
     let mut last_sent_pings = start_time;
+    let mut last_sent_getblocks = start_time;
     loop {
         // 2mb, largest message size
         let mut buf = [0; 2_000_000];
         match socket.recv_from(&mut buf) {
             Ok((amt, src)) => {
+                let mut message =
+                    Message::deserialize(&mut buf[..amt].to_vec());
                 active_nodes.insert(src, current_epoch());
-                let mut message = Message::deserialize(&mut buf[..amt].to_vec());
-                let command = String::from_utf8_lossy(&message.command);
-                println!("{}: Command \"{}\" from {}", port, command, src);
-                match command.as_ref() {
-                    "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                        socket.send_to(&pong.serialize(), src).unwrap();
-                    }
-                    "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                        let addr = Addr::serialize(&active_nodes);
-                        socket.send_to(&addr.serialize(), src).unwrap();
-                    }
-                    "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                        let addresses = Addr::deserialize(&mut message.payload);
-                        for address in &addresses {
-                            // Don't add me
-                            if socket.local_addr().unwrap() != address.address {
-                                // TODO: take the freshest timestamp
-                                println!(
-                                    "{}: Adding node address {}",
-                                    port, address.address
-                                );
-                                active_nodes.insert(address.address, address.ts);
-                            }
-                        }
-                    }
-                    "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {}
-                    &_ => {
-                        println!("{}: No match for command {}", port, command);
-                    }
-                }
+                match_message(
+                    src,
+                    &socket,
+                    &mut message,
+                    &mut active_nodes,
+                    &blocks,
+                    &port,
+                );
             }
-            Err(_err) => {
-                // println!("{:?}", err);
+            Err(ref err) if err.raw_os_error() == Some(11) => {
+                // Error { repr: Os { code: 11, message:
+                // "Resource temporarily unavailable" } }
+                // expected socket error when no message is ready
             }
+            Err(err) => {
+                println!("{:?}", err);
+            }
+        }
+        if last_sent_getblocks.elapsed().as_secs() > 10 {
+            let last_hash = blocks[blocks.len() - 1].hash();
+            getblocks.payload = last_hash.to_vec();
+            for (node, _) in active_nodes.iter() {
+                println!("{}: Sent getblocks to {}", port, &node);
+                socket.send_to(&getblocks.serialize(), node).unwrap();
+            }
+            last_sent_getblocks = time::Instant::now();
         }
         if last_sent_pings.elapsed().as_secs() > 5 {
             for (node, _) in active_nodes.iter() {
                 println!("{}: Sent ping to {}", port, &node);
                 socket.send_to(&ping.serialize(), node).unwrap();
-            }            
+            }
             last_sent_pings = time::Instant::now();
+        }
+    }
+}
+
+fn match_message(
+    src: net::SocketAddr,
+    socket: &net::UdpSocket,
+    message: &mut Message,
+    active_nodes: &mut HashMap<net::SocketAddr, u64>,
+    blocks: &Vec<Block>,
+    port: &String,
+) {
+    let command = String::from_utf8_lossy(&message.command);
+    println!("{}: Command \"{}\" from {}", port, command, src);
+    let pong = Message {
+        payload: Vec::new(),
+        command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+    match command.as_ref() {
+        "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+            socket.send_to(&pong.serialize(), src).unwrap();
+        }
+        "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+            let addr = Addr::serialize(&active_nodes);
+            socket.send_to(&addr.serialize(), src).unwrap();
+        }
+        "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+            let addresses = Addr::deserialize(&mut message.payload);
+            for address in &addresses {
+                // Don't add me
+                if socket.local_addr().unwrap() != address.address {
+                    // TODO: take the freshest timestamp
+                    println!(
+                        "{}: Adding node address {}",
+                        port, address.address
+                    );
+                    active_nodes.insert(address.address, address.ts);
+                }
+            }
+        }
+        "getblocks\u{0}\u{0}\u{0}" => {
+            let mut last_hash = [0; 32];
+            last_hash[..].clone_from_slice(&message.payload[0..32]);
+            let mut inv: Inv = Inv {
+                inv_vectors: Vec::new(),
+            };
+            for n in (0..blocks.len()).rev() {
+                let hash = blocks[n].hash();
+                if last_hash == hash {
+                    break;
+                }
+                inv.inv_vectors.push(InvVector {
+                    kind: 1,
+                    hash: hash,
+                })
+            }
+            if inv.inv_vectors.len() > 0 {
+                socket.send_to(&inv.serialize(), src).unwrap();
+            }
+            // referse for
+        }
+        "inv\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+            let _inv = Inv::deserialize(&mut message.payload);
+        }
+        "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {}
+        &_ => {
+            println!("{}: No match for command {}", port, command);
         }
     }
 }
@@ -199,7 +252,7 @@ impl Addr {
                 net::IpAddr::V6(_) => continue,
             };
             addr.payload.extend_from_slice(&ip_octets);
-            sock.port().serialize(&mut addr.payload); 
+            sock.port().serialize(&mut addr.payload);
             ts.serialize(&mut addr.payload);
         }
         addr
@@ -222,10 +275,47 @@ impl Addr {
     }
 }
 
+struct Inv {
+    inv_vectors: Vec<InvVector>,
+}
+
+impl Inv {
+    fn serialize(&self) -> Vec<u8> {
+        let inv_ascii = [0x69, 0x6e, 0x76, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut payload: Vec<u8> = Vec::new();
+        (self.inv_vectors.len() as u32).serialize(&mut payload);
+        for invv in &self.inv_vectors {
+            invv.kind.serialize(&mut payload);
+            invv.hash.serialize(&mut payload);
+        }
+        Message {
+            command: inv_ascii,
+            payload: payload,
+        }.serialize()
+    }
+    fn deserialize(payload: &mut Vec<u8>) -> Inv {
+        let mut inv = Inv {
+            inv_vectors: Vec::new(),
+        };
+        let vectors_len: u32 = Encodable::deserialize(payload);
+        for _ in 0..vectors_len {
+            inv.inv_vectors.push(InvVector {
+                kind: Encodable::deserialize(payload),
+                hash: Encodable::deserialize(payload),
+            })
+        }
+        inv
+    }
+}
+
+struct InvVector {
+    // 1 block
+    // 2 transaction
+    kind: u16,
+    hash: [u8; 32],
+}
+
 impl Message {
-    // fn _new(buf: &[u8]) -> Message {
-    //     //
-    // }
     fn serialize(&self) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::new();
         // magic numbers
