@@ -17,10 +17,12 @@ use rand::OsRng;
 use rust_base58::ToBase58;
 use secp256k1::key::SecretKey;
 use std::collections::HashMap;
+use std::io;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs, net, thread, time};
+use std::sync::mpsc;
 
 const U32_SIZE: usize = 4;
 const HASH_SIZE: usize = 32;
@@ -102,19 +104,77 @@ fn start_node() {
         ],
     };
 
+    // mine
+    let (block_snd, block_rcv) = mpsc::channel::<Block>();
+    // let (tx_snd, tx_rcv) = mpsc::channel::<Transaction>();
+    let (prev_block_snd, prev_block_rcv) = mpsc::channel::<PrevBlock>();
+    thread::spawn(move || {
+        loop {
+            let prev_block = prev_block_rcv.recv().unwrap();
+            let mut last_ts_reset = time::Instant::now();
+            let address = Address::new();
+            let transaction = create_coinbase_transaction(address.pk);
+            let transactions = vec![transaction];
+            let mut block = Block {
+                index: prev_block.index + 1,
+                version: [0; 2],
+                merkle_root: transactions_merkle_root(&transactions),
+                prev_hash: prev_block.hash,
+                transactions: transactions,
+                nonce: 0,
+                timestamp: current_epoch(),
+            };
+            loop {
+                // check if there's a new block
+                let hash = block.hash();
+                if hash_is_valid_with_current_difficulty(hash) {
+                    println!("{:?}", block.serialize());
+                    block_snd.send(block).unwrap();
+                    break
+                }
+                
+                if last_ts_reset.elapsed().as_secs() > 10 {
+                    println!("{:?}", block.nonce);
+                    block.timestamp = current_epoch();
+                    block.nonce = 0;
+                    last_ts_reset = time::Instant::now();
+                } else {
+                    block.nonce += 1;
+                }
+                match prev_block_rcv.try_recv() {
+                    Ok(prev_block) => {
+                        block.prev_hash = prev_block.hash;
+                        block.nonce = 0;
+                        block.index = prev_block.index + 1;
+                    }
+                    Err(err) => {
+                        match err {
+                            mpsc::TryRecvError::Empty => {}
+                            mpsc::TryRecvError::Disconnected => {
+                                println!("last_block_hash {:?}", err); // panic?
+                            }
+                        }
+                    }
+                }
+            }            
+        }
+    });
+
     // ask all active nodes for addresses
     for (node, _) in active_nodes.iter() {
         socket.send_to(&getaddr.serialize(), &node).unwrap();
         println!("{}: Sent getaddr to {}", port, &node);
     }
 
-    // mine
-    thread::spawn(move || {});
-
     // Message receiver
+    let mut stage = 1usize;
+    // 1 get nodes
+    // 2 get blockchain
+    // 3 start mining latest block
     let start_time = time::Instant::now();
     let mut last_sent_pings = start_time;
     let mut last_sent_getblocks = start_time;
+
     loop {
         // 2mb, largest message size
         let mut buf = [0; 2_000_000];
@@ -123,25 +183,56 @@ fn start_node() {
                 let mut message =
                     Message::deserialize(&mut buf[..amt].to_vec());
                 active_nodes.insert(src, current_epoch());
-                match_message(
+                stage = match_message(
                     src,
                     &socket,
                     &mut message,
                     &mut active_nodes,
                     &blocks,
                     &port,
+                    stage,
                 );
             }
-            Err(ref err) if err.raw_os_error() == Some(11) => {
-                // Error { repr: Os { code: 11, message:
-                // "Resource temporarily unavailable" } }
-                // expected socket error when no message is ready
-            }
             Err(err) => {
-                println!("{:?}", err);
+                match err.kind() {
+                    io::ErrorKind::WouldBlock => {
+                        // good
+                    }
+                    _ => {
+                        println!("socket {:?}", err);
+                    }
+                }
             }
         }
-        if last_sent_getblocks.elapsed().as_secs() > 10 {
+
+        // check if there's a new mined block
+        match block_rcv.try_recv() {
+            Ok(block) => {
+                // got a new mined block
+                let mut inv = Inv{
+                    inv_vectors: Vec::new(),
+                };
+                inv.inv_vectors.push(InvVector {
+                    kind: 1,
+                    hash: block.hash(),
+                });
+                blocks.push(block);
+                for (node, _) in active_nodes.iter() {
+                    println!("{}: Sent new block to {}", port, &node);
+                    socket.send_to(&inv.serialize(), node).unwrap();
+                }
+            }
+            Err(err) => {
+                match err {
+                    mpsc::TryRecvError::Empty => {}
+                    mpsc::TryRecvError::Disconnected => {
+                        println!("channel {:?}", err); // panic?
+                    }
+                }
+            }
+        }
+
+        if stage == 2usize && last_sent_getblocks.elapsed().as_secs() > 10 {
             let last_hash = blocks[blocks.len() - 1].hash();
             getblocks.payload = last_hash.to_vec();
             for (node, _) in active_nodes.iter() {
@@ -150,7 +241,13 @@ fn start_node() {
             }
             last_sent_getblocks = time::Instant::now();
         }
-        if last_sent_pings.elapsed().as_secs() > 5 {
+        if last_sent_pings.elapsed().as_secs() > 10 {
+            if stage == 1usize {
+                for (node, _) in active_nodes.iter() {
+                    socket.send_to(&getaddr.serialize(), &node).unwrap();
+                    println!("{}: Sent getaddr to {}", port, &node);
+                }
+            }
             for (node, _) in active_nodes.iter() {
                 println!("{}: Sent ping to {}", port, &node);
                 socket.send_to(&ping.serialize(), node).unwrap();
@@ -167,13 +264,15 @@ fn match_message(
     active_nodes: &mut HashMap<net::SocketAddr, u64>,
     blocks: &Vec<Block>,
     port: &String,
-) {
+    stage: usize,
+) -> usize {
     let command = String::from_utf8_lossy(&message.command);
     println!("{}: Command \"{}\" from {}", port, command, src);
     let pong = Message {
         payload: Vec::new(),
         command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
     };
+    let mut stage = stage;
     match command.as_ref() {
         "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
             socket.send_to(&pong.serialize(), src).unwrap();
@@ -193,6 +292,9 @@ fn match_message(
                         port, address.address
                     );
                     active_nodes.insert(address.address, address.ts);
+                    if active_nodes.len() >= 3 {
+                        stage = 2usize;
+                    }
                 }
             }
         }
@@ -219,12 +321,19 @@ fn match_message(
         }
         "inv\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
             let _inv = Inv::deserialize(&mut message.payload);
+            println!("{}: {}", port, "got new inv");
         }
         "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {}
         &_ => {
             println!("{}: No match for command {}", port, command);
         }
     }
+    stage
+}
+
+struct PrevBlock {
+    hash: [u8; 32],
+    index: u32,
 }
 
 struct Message {
@@ -809,7 +918,7 @@ fn hash_is_valid_with_current_difficulty(hash: [u8; 32]) -> bool {
     //     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     // ];
     let difficulty = [
-        0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     let difficulty = U256::from_big_endian(&difficulty);
