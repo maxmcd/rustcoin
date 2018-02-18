@@ -1,12 +1,12 @@
-use rc::blockdata::{Block, Wallet, Address};
-use rc::byteorder::{ByteOrder};
-use rc::encode::Encodable;
+use rc::blockdata::{Address, Block, Wallet};
+use rc::byteorder::ByteOrder;
 use rc::byteorder;
-use rc::constants::{U32_SIZE};
+use rc::constants::U32_SIZE;
+use rc::encode::Encodable;
 
-use std;
-use std::{env, fs};
 use std::io::{Read, Write};
+use std::{env, fs};
+use std;
 
 pub fn rustcoin_dir() -> std::path::PathBuf {
     let home_dir = env::home_dir().unwrap();

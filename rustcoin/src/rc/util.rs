@@ -44,7 +44,6 @@ pub fn coinbase() -> [u8; 32] {
     out
 }
 
-
 pub fn sha_256_bytes(bytes: &[u8]) -> [u8; 32] {
     let mut sha = Sha256::new();
     sha.input(bytes);
@@ -74,5 +73,3 @@ pub fn hash_is_valid_with_current_difficulty(hash: [u8; 32]) -> bool {
     let difficulty = U256::from_big_endian(&difficulty);
     return hash_u256 < difficulty;
 }
-
-

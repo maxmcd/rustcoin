@@ -1,6 +1,6 @@
 use rc::filesystem::{fetch_blocks, write_blocks};
-use rc::blockdata::{Block, Address, Transaction};
-use rc::blockdata::{MerkleRoot};
+use rc::blockdata::{Address, Block, Transaction};
+use rc::blockdata::MerkleRoot;
 use rc::encode::Encodable;
 use rc::util::{current_epoch, sha_256_bytes};
 use rc::util;
@@ -8,11 +8,14 @@ use rc::util;
 use std::collections::HashMap;
 use std::io;
 use std::net::ToSocketAddrs;
-use std::{env, net, thread, time};
 use std::sync::mpsc;
+use std::{env, net, thread, time};
 
-const GETBLOCKS_CMD: [u8; 12] = [0x67, 0x65, 0x74, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x73, 0, 0, 0];
-const GETADDR_CMD: [u8; 12] = [0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0];
+const GETBLOCKS_CMD: [u8; 12] = [
+    0x67, 0x65, 0x74, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x73, 0, 0, 0
+];
+const GETADDR_CMD: [u8; 12] =
+    [0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0];
 const PING_CMD: [u8; 12] = [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0];
 
 struct NetworkState {
@@ -38,7 +41,12 @@ impl NetworkState {
             blocks: fetch_blocks(),
             step: 1,
         };
-        let duration: Option<time::Duration> = Some(time::Duration::new(0, 1000));
+        // 1 get nodes
+        // 2 get blockchain
+        // 3 start mining latest block
+
+        let duration: Option<time::Duration> =
+            Some(time::Duration::new(0, 1000));
         ns.socket.set_read_timeout(duration).unwrap();
 
         if ns.port != "8333".to_string() {
@@ -51,13 +59,75 @@ impl NetworkState {
         }
         ns
     }
+
+    fn match_message(&mut self, src: net::SocketAddr, message: &mut Message) {
+        let command = String::from_utf8_lossy(&message.command);
+        println!("{}: Command \"{}\" from {}", self.port, command, src);
+        let pong = Message {
+            payload: Vec::new(),
+            command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        match command.as_ref() {
+            "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                self.socket.send_to(&pong.serialize(), src).unwrap();
+            }
+            "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                let addr = Addr::serialize(&self.active_nodes);
+                self.socket.send_to(&addr.serialize(), src).unwrap();
+            }
+            "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                let addresses = Addr::deserialize(&mut message.payload);
+                for address in &addresses {
+                    // Don't add me
+                    if self.socket.local_addr().unwrap() != address.address {
+                        // TODO: take the freshest timestamp
+                        println!(
+                            "{}: Adding node address {}",
+                            self.port, address.address
+                        );
+                        self.active_nodes.insert(address.address, address.ts);
+                        if self.active_nodes.len() >= 3 {
+                            self.step = 2usize;
+                        }
+                    }
+                }
+            }
+            "getblocks\u{0}\u{0}\u{0}" => {
+                let mut last_hash = [0; 32];
+                last_hash[..].clone_from_slice(&message.payload[0..32]);
+                let mut inv: Inv = Inv {
+                    inv_vectors: Vec::new(),
+                };
+                for n in (0..self.blocks.len()).rev() {
+                    let hash = self.blocks[n].hash();
+                    if last_hash == hash {
+                        break;
+                    }
+                    inv.inv_vectors.push(InvVector {
+                        kind: 1,
+                        hash: hash,
+                    })
+                }
+                if inv.inv_vectors.len() > 0 {
+                    self.socket.send_to(&inv.serialize(), src).unwrap();
+                }
+                // referse for
+            }
+            "inv\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                let _inv = Inv::deserialize(&mut message.payload);
+                println!("{}: {}", self.port, "got new inv");
+            }
+            "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {}
+            &_ => {
+                println!("{}: No match for command {}", self.port, command);
+            }
+        }
+    }
 }
 
 pub fn start_node() {
-
     let mut ns = NetworkState::new();
-    
-    println!("{}: {}", ns.port, "Fetching blocks");
+    println!("{}: {}", ns.port, "Fetching local blocks");
     if ns.blocks.len() == 0 {
         println!("{}: {}", ns.port, "No blocks found, writing genesis block.");
         ns.blocks.push(Block::genesis_block());
@@ -82,7 +152,8 @@ pub fn start_node() {
             let prev_block = prev_block_rcv.recv().unwrap();
             let mut last_ts_reset = time::Instant::now();
             let address = Address::new();
-            let transaction = Transaction::create_coinbase_transaction(address.pk);
+            let transaction =
+                Transaction::create_coinbase_transaction(address.pk);
             let transactions = vec![transaction];
             let mut block = Block {
                 index: prev_block.index + 1,
@@ -99,9 +170,9 @@ pub fn start_node() {
                 if util::hash_is_valid_with_current_difficulty(hash) {
                     println!("{:?}", block.serialize());
                     block_snd.send(block).unwrap();
-                    break
+                    break;
                 }
-                
+
                 if last_ts_reset.elapsed().as_secs() > 10 {
                     println!("{:?}", block.nonce);
                     block.timestamp = current_epoch();
@@ -125,7 +196,7 @@ pub fn start_node() {
                         }
                     }
                 }
-            }            
+            }
         }
     });
 
@@ -136,10 +207,6 @@ pub fn start_node() {
     }
 
     // Message receiver
-    let mut stage = 1usize;
-    // 1 get nodes
-    // 2 get blockchain
-    // 3 start mining latest block
     let start_time = time::Instant::now();
     let mut last_sent_pings = start_time;
     let mut last_sent_getblocks = start_time;
@@ -152,33 +219,21 @@ pub fn start_node() {
                 let mut message =
                     Message::deserialize(&mut buf[..amt].to_vec());
                 ns.active_nodes.insert(src, current_epoch());
-                stage = match_message(
-                    src,
-                    &ns.socket,
-                    &mut message,
-                    &mut ns.active_nodes,
-                    &ns.blocks,
-                    &ns.port,
-                    stage,
-                );
+                ns.match_message(src, &mut message);
             }
-            Err(err) => {
-                match err.kind() {
-                    io::ErrorKind::WouldBlock => {
-                        // good
-                    }
-                    _ => {
-                        println!("socket {:?}", err);
-                    }
+            Err(err) => match err.kind() {
+                io::ErrorKind::WouldBlock => {}
+                _ => {
+                    println!("socket {:?}", err);
                 }
-            }
+            },
         }
 
         // check if there's a new mined block
         match block_rcv.try_recv() {
             Ok(block) => {
                 // got a new mined block
-                let mut inv = Inv{
+                let mut inv = Inv {
                     inv_vectors: Vec::new(),
                 };
                 inv.inv_vectors.push(InvVector {
@@ -201,7 +256,7 @@ pub fn start_node() {
             }
         }
 
-        if stage == 2usize && last_sent_getblocks.elapsed().as_secs() > 10 {
+        if ns.step == 2usize && last_sent_getblocks.elapsed().as_secs() > 10 {
             let last_hash = ns.blocks[ns.blocks.len() - 1].hash();
             getblocks.payload = last_hash.to_vec();
             for (node, _) in ns.active_nodes.iter() {
@@ -211,7 +266,7 @@ pub fn start_node() {
             last_sent_getblocks = time::Instant::now();
         }
         if last_sent_pings.elapsed().as_secs() > 10 {
-            if stage == 1usize {
+            if ns.step == 1usize {
                 for (node, _) in ns.active_nodes.iter() {
                     ns.socket.send_to(&getaddr.serialize(), &node).unwrap();
                     println!("{}: Sent getaddr to {}", ns.port, &node);
@@ -224,80 +279,6 @@ pub fn start_node() {
             last_sent_pings = time::Instant::now();
         }
     }
-}
-
-fn match_message(
-    src: net::SocketAddr,
-    socket: &net::UdpSocket,
-    message: &mut Message,
-    active_nodes: &mut HashMap<net::SocketAddr, u64>,
-    blocks: &Vec<Block>,
-    port: &String,
-    stage: usize,
-) -> usize {
-    let command = String::from_utf8_lossy(&message.command);
-    println!("{}: Command \"{}\" from {}", port, command, src);
-    let pong = Message {
-        payload: Vec::new(),
-        command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
-    };
-    let mut stage = stage;
-    match command.as_ref() {
-        "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-            socket.send_to(&pong.serialize(), src).unwrap();
-        }
-        "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-            let addr = Addr::serialize(&active_nodes);
-            socket.send_to(&addr.serialize(), src).unwrap();
-        }
-        "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-            let addresses = Addr::deserialize(&mut message.payload);
-            for address in &addresses {
-                // Don't add me
-                if socket.local_addr().unwrap() != address.address {
-                    // TODO: take the freshest timestamp
-                    println!(
-                        "{}: Adding node address {}",
-                        port, address.address
-                    );
-                    active_nodes.insert(address.address, address.ts);
-                    if active_nodes.len() >= 3 {
-                        stage = 2usize;
-                    }
-                }
-            }
-        }
-        "getblocks\u{0}\u{0}\u{0}" => {
-            let mut last_hash = [0; 32];
-            last_hash[..].clone_from_slice(&message.payload[0..32]);
-            let mut inv: Inv = Inv {
-                inv_vectors: Vec::new(),
-            };
-            for n in (0..blocks.len()).rev() {
-                let hash = blocks[n].hash();
-                if last_hash == hash {
-                    break;
-                }
-                inv.inv_vectors.push(InvVector {
-                    kind: 1,
-                    hash: hash,
-                })
-            }
-            if inv.inv_vectors.len() > 0 {
-                socket.send_to(&inv.serialize(), src).unwrap();
-            }
-            // referse for
-        }
-        "inv\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-            let _inv = Inv::deserialize(&mut message.payload);
-            println!("{}: {}", port, "got new inv");
-        }
-        "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {}
-        &_ => {
-            println!("{}: No match for command {}", port, command);
-        }
-    }
-    stage
 }
 
 struct PrevBlock {
@@ -429,7 +410,6 @@ impl Message {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -1,13 +1,13 @@
-use rc::util;
-use rc::util::{merkle, sha_256_bytes};
 use rc::constants::{HASH_SIZE, PK_SIZE, SIG_SIZE};
 use rc::encode::Encodable;
+use rc::util::{merkle, sha_256_bytes};
+use rc::util;
 
 use bigint::uint::U256;
-use rand::OsRng;
 use crypto::digest::Digest;
-use rust_base58::ToBase58;
 use crypto::ripemd160::Ripemd160;
+use rand::OsRng;
+use rust_base58::ToBase58;
 use self::secp256k1::key::SecretKey;
 
 extern crate secp256k1;
@@ -202,11 +202,11 @@ impl Block {
         let nonce: u64 = 61090;
         let ts: u64 = 1518534873;
         let pk: [u8; 64] = [
-            131, 153, 89, 70, 234, 230, 140, 10, 87, 8, 195, 104, 112, 207, 162,
-            152, 3, 177, 70, 181, 118, 138, 178, 233, 67, 190, 138, 89, 35, 118,
-            74, 15, 101, 171, 220, 156, 132, 35, 153, 242, 221, 134, 21, 113, 224,
-            241, 218, 198, 195, 117, 117, 243, 235, 73, 155, 25, 210, 16, 127, 62,
-            123, 59, 191, 13,
+            131, 153, 89, 70, 234, 230, 140, 10, 87, 8, 195, 104, 112, 207,
+            162, 152, 3, 177, 70, 181, 118, 138, 178, 233, 67, 190, 138, 89,
+            35, 118, 74, 15, 101, 171, 220, 156, 132, 35, 153, 242, 221, 134,
+            21, 113, 224, 241, 218, 198, 195, 117, 117, 243, 235, 73, 155, 25,
+            210, 16, 127, 62, 123, 59, 191, 13,
         ];
         let transaction = Transaction::create_coinbase_transaction(pk);
         let transactions = vec![transaction];
@@ -369,7 +369,6 @@ fn _difficulty_calculations() {
     println!("{:?}", out);
     println!("{:?}", difficulty_1_target);
 }
-
 
 #[cfg(test)]
 mod tests {
