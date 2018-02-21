@@ -1,36 +1,15 @@
 # Rustcoin
+A toy cryptocurrency to learn about the blockchain and Rust. Functionality heavily inspired by the original bitcoin client.
 
-Todo:
+### Installation
 
- - Check local blockchain data, check validity and load into memory (as needed)
- - Find peers and confirm vailidity of blockchain
- - Start mining, accept transactions, add transactions to next block
-
-Steps for startup:
- - Check local blockchain
- - Load blocks and transactions
- - Load unspent transactions into memory?
- - Find clients
- - Getblocks from last known hash
-
-Network messages
-`ping`
-`pong`
-`getblocks`
-`getaddr`
-
-`inv` blocks and transactions
-Maybe replace `inv` with specific object requests.
-`transaction`
-`block`
+Clone this repo, install docker and docker compose. Run `docker-compose up` in the root of the repo. 4 nodes will start up a single container and attempt to start mining and communicating with each other. 
 
 
-
-### Links: 
+### Links/Resources: 
 
  - Rust Book: https://doc.rust-lang.org/book/second-edition/
  - Example block: https://webbtc.com/block/000000000000000001f942eb4bfa0aeccb6a14c268f4c72d5fff17270da771b9
- - Bincode: https://github.com/TyOverby/bincode
  - secp256k1: https://www.wpsoftware.net/rustdoc/secp256k1/
  
 Merkle Tree
