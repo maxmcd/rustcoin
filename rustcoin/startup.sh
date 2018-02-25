@@ -11,6 +11,6 @@ mkdir -p /opt/users/third
 cargo build --release
 
 /opt/rustcoin/target/release/rustcoin &
-HOME=/opt/users/first PORT=8334 /opt/rustcoin/target/release/rustcoin &
+sleep 10 && HOME=/opt/users/first PORT=8334 /opt/rustcoin/target/release/rustcoin &
 HOME=/opt/users/second PORT=8335 /opt/rustcoin/target/release/rustcoin &
 HOME=/opt/users/third PORT=8336 /opt/rustcoin/target/release/rustcoin

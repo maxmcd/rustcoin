@@ -17,6 +17,8 @@ Merkle Tree
  - https://bitcoin.stackexchange.com/questions/10479/what-is-the-merkle-root
 
 Networking
+ - https://en.bitcoin.it/wiki/Network
+ - https://en.bitcoin.it/wiki/Protocol_rules
  - TCP Example server: https://github.com/Nervengift/chat-server-example/blob/master/src/main.rs
  - https://users.rust-lang.org/t/how-to-write-a-simple-tcp-client-and-server/3712
  - https://bitcoin.stackexchange.com/questions/3536/how-do-bitcoin-clients-find-each-other
