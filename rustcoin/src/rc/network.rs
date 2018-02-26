@@ -51,14 +51,14 @@ impl NetworkState {
             streams: Vec::new(),
             blocks: fetch_blocks(),
             step: 1,
+            // 1 get nodes
+            // 2 get blockchain
+            // 3 start mining latest block
             outbound_addrs: HashMap::new(),
         };
         ns.listener
             .set_nonblocking(true)
             .expect("cannot set tcp nonblocking");
-        // 1 get nodes
-        // 2 get blockchain
-        // 3 start mining latest block
 
         // let duration: Option<time::Duration> =
         //     Some(time::Duration::new(0, 1000));
@@ -80,9 +80,95 @@ impl NetworkState {
         ns
     }
 
+    fn process_message(&mut self, i: usize, buf: &mut [u8]) {
+        let mut message = Message::deserialize(&mut buf.to_vec());
+        let command = String::from_utf8_lossy(&message.command);
+        println!(
+            "{}: Command \"{}\" from {}",
+            self.port,
+            command,
+            self.streams[i].stream.peer_addr().unwrap()
+        );
+        let pong = Message {
+            payload: Vec::new(),
+            command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        match command.as_ref() {
+            "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                self.streams[i].stream.write(&pong.serialize()).unwrap();
+            }
+            "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                let addr = Addr::msg_from_streams(&self.streams);
+                self.streams[i].stream.write(&addr.serialize()).unwrap();
+            }
+            "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                let addresses = Addr::deserialize(&mut message.payload);
+                for address in &addresses {
+                    // Don't add me
+                    if self.listener.local_addr().unwrap() != address.address {
+                        // TODO: take the freshest timestamp
+                        // TODO: don't add peers we're already connected to
+                        println!(
+                            "{}: Adding node address {}",
+                            self.port, address.address
+                        );
+                        self.add_stream_from_addr(&address.address)
+                    }
+                }
+            }
+            "getblocks\u{0}\u{0}\u{0}" => {
+                let mut last_hash = [0; 32];
+                last_hash[..].clone_from_slice(&message.payload[0..32]);
+                let mut inv: Inv = Inv {
+                    inv_vectors: Vec::new(),
+                };
+                for n in (0..self.blocks.len()).rev() {
+                    let hash = self.blocks[n].hash();
+                    if last_hash == hash {
+                        break;
+                    }
+                    inv.inv_vectors.push(InvVector {
+                        kind: 1,
+                        hash: hash,
+                    })
+                }
+                if inv.inv_vectors.len() > 0 {
+                    self.streams[i].stream.write(&inv.serialize()).unwrap();
+                }
+                // referse for
+            }
+            "inv\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                let _inv = Inv::deserialize(&mut message.payload);
+                println!("{}: {}", self.port, "got new inv");
+            }
+            "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+                self.streams[i].ts = current_epoch();
+            }
+            &_ => {
+                println!("{}: No match for command {}", self.port, command);
+            }
+        };
+    }
+
+    fn process_inbound(&mut self) {
+        for i in 0..self.streams.len() {
+            // let mut buf: Vec<u8> = Vec::new();
+            let mut buf = [0u8; 2_000_000];
+            match self.streams[i].stream.read(&mut buf) {
+                Ok(_amt) => self.process_message(i, &mut buf[0.._amt]),
+                Err(err) => match err.kind() {
+                    io::ErrorKind::WouldBlock => {}
+                    _ => {
+                        println!("socket {:?}", err);
+                    }
+                },
+            }
+        }
+    }
+
     fn add_stream_from_addr(&mut self, addr: &net::SocketAddr) {
         match self.outbound_addrs.get(addr) {
-            Some(_) => {},
+            Some(_) => {}
             None => {
                 self.outbound_addrs.insert(*addr, true);
                 match net::TcpStream::connect(addr) {
@@ -95,7 +181,7 @@ impl NetworkState {
                             self.port, addr, err
                         );
                     }
-                }                
+                }
             }
         }
     }
@@ -104,7 +190,7 @@ impl NetworkState {
         stream
             .set_nonblocking(true)
             .expect("set_nonblocking call failed");
-        self.streams.push(Stream{
+        self.streams.push(Stream {
             stream: stream,
             is_outbound: is_outbound,
             ts: current_epoch(),
@@ -119,7 +205,6 @@ impl NetworkState {
             }
         }
     }
-    
 }
 
 pub fn start_node() {
@@ -204,12 +289,14 @@ pub fn start_node() {
 
     loop {
         let hundo_millis = time::Duration::from_millis(1000);
-        println!("{}: looped {}", ns.port, ns.streams.len());
         thread::sleep(hundo_millis);
 
         match ns.listener.accept() {
             Ok((socket, addr)) => {
-                println!("{}: {} {}", ns.port, "New inbound node connected", addr);
+                println!(
+                    "{}: {} {}",
+                    ns.port, "New inbound node connected", addr
+                );
                 ns.add_stream(socket, false);
             }
             Err(err) => match err.kind() {
@@ -220,93 +307,7 @@ pub fn start_node() {
             },
         }
 
-        let mut addr_to_add: Vec<net::SocketAddr> = Vec::new();
-        let step = ns.step;
-        for mut stream in &ns.streams {
-            let mut stream = &stream.stream;
-
-            let mut buf = [0; 2_000_000];            
-            match stream.read(&mut buf) {
-                Ok(_amt) => {
-                    let mut message = Message::deserialize(&mut buf.to_vec());
-                    let command = String::from_utf8_lossy(&message.command);
-                    println!(
-                        "{}: Command \"{}\" from {}",
-                        ns.port,
-                        command,
-                        stream.peer_addr().unwrap()
-                    );
-                    let pong = Message {
-                        payload: Vec::new(),
-                        command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
-                    };
-                    match command.as_ref() {
-                        "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                            stream.write(&pong.serialize()).unwrap();
-                        }
-                        "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                            let addr = Addr::msg_from_streams(&ns.streams);
-                            stream.write(&addr.serialize()).unwrap();
-                        }
-                        "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                            let addresses = Addr::deserialize(&mut message.payload);
-                            for address in &addresses {
-                                // Don't add me
-                                if ns.listener.local_addr().unwrap() != address.address {
-                                    // TODO: take the freshest timestamp
-                                    // TODO: don't add peers we're already connected to
-                                    println!(
-                                        "{}: Adding node address {}",
-                                        ns.port, address.address
-                                    );
-                                    addr_to_add.push(address.address);
-                                }
-                            }
-                        }
-                        "getblocks\u{0}\u{0}\u{0}" => {
-                            let mut last_hash = [0; 32];
-                            last_hash[..].clone_from_slice(&message.payload[0..32]);
-                            let mut inv: Inv = Inv {
-                                inv_vectors: Vec::new(),
-                            };
-                            for n in (0..ns.blocks.len()).rev() {
-                                let hash = ns.blocks[n].hash();
-                                if last_hash == hash {
-                                    break;
-                                }
-                                inv.inv_vectors.push(InvVector {
-                                    kind: 1,
-                                    hash: hash,
-                                })
-                            }
-                            if inv.inv_vectors.len() > 0 {
-                                stream.write(&inv.serialize()).unwrap();
-                            }
-                            // referse for
-                        }
-                        "inv\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                            let _inv = Inv::deserialize(&mut message.payload);
-                            println!("{}: {}", ns.port, "got new inv");
-                        }
-                        "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {}
-                        &_ => {
-                            println!("{}: No match for command {}", ns.port, command);
-                        }
-                    };
-                }
-                Err(err) => match err.kind() {
-                    io::ErrorKind::WouldBlock => {}
-                    _ => {
-                        println!("socket {:?}", err);
-                    }
-                },
-            }
-        }
-
-        ns.step = step;
-        for addr in &addr_to_add {
-            ns.add_stream_from_addr(&addr)
-        };
+        ns.process_inbound();
 
         // check if there's a new mined block
         match block_rcv.try_recv() {
@@ -377,7 +378,7 @@ impl Addr {
         };
         (addrs.len() as u16).serialize(&mut msg.payload);
         for addr in addrs {
-            let ts = current_epoch();
+            let ts = addr.ts;
             let ip_octets = match addr.address.ip() {
                 net::IpAddr::V4(ip) => ip.octets(),
                 net::IpAddr::V6(_) => continue,
@@ -392,7 +393,7 @@ impl Addr {
         let mut addrs: Vec<Addr> = Vec::new();
         for stream in streams {
             if stream.is_outbound {
-                addrs.push(Addr{
+                addrs.push(Addr {
                     address: stream.stream.peer_addr().unwrap(),
                     ts: stream.ts,
                 })
@@ -459,7 +460,6 @@ struct InvVector {
 }
 
 impl Message {
-
     fn from_command(command: [u8; 12]) -> Message {
         Message {
             payload: Vec::new(),
