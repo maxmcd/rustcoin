@@ -5,10 +5,17 @@ extern crate crypto;
 extern crate rand;
 extern crate rust_base58;
 extern crate secp256k1;
+#[macro_use]
+extern crate lazy_static;
 
-mod rc;
-use rc::{filesystem, blockdata, network};
-use std::{env};
+mod blockdata;
+mod constants;
+mod encode;
+mod filesystem;
+mod network;
+mod util;
+
+use std::env;
 
 fn main() {
     let args: Vec<_> = env::args().collect();
@@ -33,6 +40,6 @@ fn main() {
         println!(
             "{}",
             "Starting rustcoin node...\nAvailable commands: \n\tnew-address\n\taddresses");
-       network::start_node();
+        network::start_node();
     }
 }

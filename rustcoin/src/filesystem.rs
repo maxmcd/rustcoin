@@ -1,12 +1,12 @@
-use rc::blockdata::{Address, Block, Wallet};
-use rc::byteorder::ByteOrder;
-use rc::byteorder;
-use rc::constants::U32_SIZE;
-use rc::encode::Encodable;
+use blockdata::{Address, Block, Wallet};
+use byteorder;
+use byteorder::ByteOrder;
+use constants::U32_SIZE;
+use encode::Encodable;
 
+use std;
 use std::io::{Read, Write};
 use std::{env, fs};
-use std;
 
 pub fn rustcoin_dir() -> std::path::PathBuf {
     let home_dir = env::home_dir().unwrap();
@@ -117,7 +117,9 @@ pub fn create_new_address() {
         .write(true)
         .open(&rustcoin_dir().join("wallet.dat"))
         .unwrap();
-    wallet_file.write_all(&wallet.serialize()).unwrap();
+    wallet_file
+        .write_all(&wallet.serialize())
+        .unwrap();
     wallet_file.sync_data().unwrap();
 }
 

@@ -1,14 +1,14 @@
-use rc::constants::{HASH_SIZE, PK_SIZE, SIG_SIZE};
-use rc::encode::Encodable;
-use rc::util::{merkle, sha_256_bytes};
-use rc::util;
+use constants::{HASH_SIZE, PK_SIZE, SIG_SIZE};
+use encode::Encodable;
+use util;
+use util::{merkle, sha_256_bytes};
 
+use self::secp256k1::key::SecretKey;
 use bigint::uint::U256;
 use crypto::digest::Digest;
 use crypto::ripemd160::Ripemd160;
 use rand::OsRng;
 use rust_base58::ToBase58;
-use self::secp256k1::key::SecretKey;
 
 extern crate secp256k1;
 
@@ -100,7 +100,9 @@ impl MerkleRoot for Vec<Transaction> {
     fn merkle_root(&self) -> [u8; 32] {
         let mut items: Vec<[u8; 32]> = Vec::new();
         for transaction in self {
-            items.push(sha_256_bytes(&sha_256_bytes(&transaction.serialize())));
+            items.push(sha_256_bytes(
+                &sha_256_bytes(&transaction.serialize()),
+            ));
         }
         merkle(items)
     }
@@ -132,7 +134,8 @@ impl TxIn {
         let bytes = &bytes[..(bytes.len() - 64)]; // remove empty sig
         let bytes = util::sha_256_bytes(&bytes);
         let message = secp256k1::Message::from_slice(&bytes).unwrap();
-        let result = secp.sign(&message, &sk).expect("Failed to sign");
+        let result = secp.sign(&message, &sk)
+            .expect("Failed to sign");
         let signature = result.serialize_compact(&secp);
         &self.signature[..].clone_from_slice(&signature);
     }
@@ -284,7 +287,7 @@ impl Address {
         address_from_pk(self.pk)
     }
 
-    fn serialize(&self) -> [u8; (32 + 64)] {
+    pub fn serialize(&self) -> [u8; (32 + 64)] {
         let mut out = [0; (32 + 64)];
         let bytes = [&self.sk[..], &self.pk[..]].concat();
         out[..].clone_from_slice(&bytes);

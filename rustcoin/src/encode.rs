@@ -17,12 +17,12 @@ pub trait Encodable {
 }
 
 macro_rules! impl_ints {
-    ( $ty:ident, $meth_write:ident, $meth_read:ident, $bytes:expr ) => (
+    ($ty:ident, $meth_write:ident, $meth_read:ident, $bytes:expr) => {
         impl Encodable for $ty {
             fn serialize(&self, mut o: &mut Vec<u8>) {
                 extend_vec(&mut o, $bytes);
                 let vlen = o.len();
-                BigEndian::$meth_write(&mut o[(vlen-$bytes)..], *self);
+                BigEndian::$meth_write(&mut o[(vlen - $bytes)..], *self);
             }
             fn deserialize(mut o: &mut Vec<u8>) -> $ty {
                 let out = BigEndian::$meth_read(&o[..$bytes]);
@@ -30,15 +30,15 @@ macro_rules! impl_ints {
                 out
             }
         }
-    )
+    };
 }
 
 impl_ints!(u64, write_u64, read_u64, 8);
 impl_ints!(u32, write_u32, read_u32, 4);
 impl_ints!(u16, write_u16, read_u16, 2);
 
-macro_rules! impl_array{
-    ( $size:expr ) => (
+macro_rules! impl_array {
+    ($size:expr) => {
         impl Encodable for [u8; $size] {
             fn serialize(&self, o: &mut Vec<u8>) {
                 o.extend_from_slice(&self[..]);
@@ -51,7 +51,7 @@ macro_rules! impl_array{
                 out
             }
         }
-    )
+    };
 }
 impl_array!(2);
 impl_array!(4);

@@ -1,21 +1,22 @@
-use rc::filesystem::{fetch_blocks, write_blocks};
-use rc::blockdata::{Address, Block, Transaction};
-use rc::blockdata::MerkleRoot;
-use rc::encode::Encodable;
-use rc::util::{current_epoch, sha_256_bytes};
-use rc::util;
+use blockdata::MerkleRoot;
+use blockdata::{Address, Block, Transaction};
+use encode::Encodable;
+use filesystem::{fetch_blocks, write_blocks};
+use util;
+use util::{current_epoch, sha_256_bytes};
 
+use std::collections::HashMap;
 use std::io;
 use std::io::{Read, Write};
-use std::collections::HashMap;
 use std::sync::mpsc;
 use std::{env, net, thread, time};
 
 const GETBLOCKS_CMD: [u8; 12] = [
-    0x67, 0x65, 0x74, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x73, 0, 0, 0
+    0x67, 0x65, 0x74, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x73, 0, 0, 0,
 ];
-const GETADDR_CMD: [u8; 12] =
-    [0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0];
+const GETADDR_CMD: [u8; 12] = [
+    0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0,
+];
 const PING_CMD: [u8; 12] = [0x70, 0x69, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0];
 
 struct Stream {
@@ -73,8 +74,14 @@ impl NetworkState {
                 };
                 let addr = Addr::msg_from_addrs(&vec![addr]);
                 let getaddr = Message::from_command(GETADDR_CMD);
-                ns.streams[0].stream.write(&addr.serialize()).unwrap();
-                ns.streams[0].stream.write(&getaddr.serialize()).unwrap();
+                ns.streams[0]
+                    .stream
+                    .write(&addr.serialize())
+                    .unwrap();
+                ns.streams[0]
+                    .stream
+                    .write(&getaddr.serialize())
+                    .unwrap();
             }
         }
         ns
@@ -95,11 +102,17 @@ impl NetworkState {
         };
         match command.as_ref() {
             "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
-                self.streams[i].stream.write(&pong.serialize()).unwrap();
+                self.streams[i]
+                    .stream
+                    .write(&pong.serialize())
+                    .unwrap();
             }
             "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
                 let addr = Addr::msg_from_streams(&self.streams);
-                self.streams[i].stream.write(&addr.serialize()).unwrap();
+                self.streams[i]
+                    .stream
+                    .write(&addr.serialize())
+                    .unwrap();
             }
             "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
                 let addresses = Addr::deserialize(&mut message.payload);
@@ -133,7 +146,10 @@ impl NetworkState {
                     })
                 }
                 if inv.inv_vectors.len() > 0 {
-                    self.streams[i].stream.write(&inv.serialize()).unwrap();
+                    self.streams[i]
+                        .stream
+                        .write(&inv.serialize())
+                        .unwrap();
                 }
                 // referse for
             }
@@ -145,7 +161,10 @@ impl NetworkState {
                 self.streams[i].ts = current_epoch();
             }
             &_ => {
-                println!("{}: No match for command {}", self.port, command);
+                println!(
+                    "{}: No match for command {}",
+                    self.port, command
+                );
             }
         };
     }
@@ -211,7 +230,10 @@ pub fn start_node() {
     let mut ns = NetworkState::new();
     println!("{}: {}", ns.port, "Fetching local blocks");
     if ns.blocks.len() == 0 {
-        println!("{}: {}", ns.port, "No blocks found, writing genesis block.");
+        println!(
+            "{}: {}",
+            ns.port, "No blocks found, writing genesis block."
+        );
         ns.blocks.push(Block::genesis_block());
         write_blocks(&ns.blocks);
     }
@@ -234,6 +256,7 @@ pub fn start_node() {
             let prev_block = prev_block_rcv.recv().unwrap();
             let mut last_ts_reset = time::Instant::now();
             let address = Address::new();
+            println!("{:?}", address.serialize()[..].to_vec());
             let transaction =
                 Transaction::create_coinbase_transaction(address.pk);
             let transactions = vec![transaction];
@@ -287,6 +310,12 @@ pub fn start_node() {
     let mut last_sent_pings = start_time;
     let mut last_sent_getblocks = start_time;
 
+    _prev_block_snd
+        .send(PrevBlock {
+            hash: last_hash,
+            index: 0,
+        })
+        .unwrap();
     loop {
         let hundo_millis = time::Duration::from_millis(1000);
         thread::sleep(hundo_millis);
@@ -499,15 +528,15 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::{Addr, Message};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::collections::HashMap;
     use std::net;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
     fn ascii_verify() {
         assert_eq!(
             String::from_utf8_lossy(&[
-                0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0
+                0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0,
             ]),
             "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}".to_string()
         );

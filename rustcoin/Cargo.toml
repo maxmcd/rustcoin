@@ -4,9 +4,10 @@ version = "0.1.0"
 authors = ["maxmcd <max.t.mcdonnell@gmail.com>"]
 
 [dependencies]
-rust-crypto = "0.2.36"
-secp256k1 = {version = "0.8", features = ["rand"]}
-rand = "0.3"
-rust-base58 = "0.0.4"
 bigint = "4.2.0"
 byteorder = "1.2.1"
+lazy_static = "1.0"
+rand = "0.3"
+rust-base58 = "0.0.4"
+rust-crypto = "0.2.36"
+secp256k1 = {version = "0.8", features = ["rand"]}
