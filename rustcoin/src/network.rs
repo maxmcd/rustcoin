@@ -11,13 +11,21 @@ use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::{env, net, thread, time};
 
-const GETBLOCKS_CMD: [u8; 12] = [
-    0x67, 0x65, 0x74, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x73, 0, 0, 0,
-];
-const GETADDR_CMD: [u8; 12] = [
-    0x67, 0x65, 0x74, 0x61, 0x64, 0x64, 0x72, 0, 0, 0, 0, 0,
-];
-const PING_CMD: [u8; 12] = [0x70, 0x69, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0];
+lazy_static! {
+    static ref INV_CMD: [u8; 12] = { cmd_from_str("inv") };
+    static ref PING_CMD: [u8; 12] = { cmd_from_str("ping") };
+    static ref GETBLOCKS_CMD: [u8; 12] = { cmd_from_str("getblocks") };
+    static ref GETADDR_CMD: [u8; 12] = { cmd_from_str("getaddr") };
+    static ref ADDR_CMD: [u8; 12] = { cmd_from_str("addr") };
+    static ref PONG_CMD: [u8; 12] = { cmd_from_str("pong") };
+}
+
+fn cmd_from_str(cmd: &str) -> [u8; 12] {
+    let mut out = [0u8; 12];
+    let bytes = String::from(cmd).into_bytes();
+    out[..bytes.len()].clone_from_slice(&bytes[0..bytes.len()]);
+    out
+}
 
 struct Stream {
     stream: net::TcpStream,
@@ -73,7 +81,7 @@ impl NetworkState {
                     ts: current_epoch(),
                 };
                 let addr = Addr::msg_from_addrs(&vec![addr]);
-                let getaddr = Message::from_command(GETADDR_CMD);
+                let getaddr = Message::from_command(*GETADDR_CMD);
                 ns.streams[0]
                     .stream
                     .write(&addr.serialize())
@@ -98,23 +106,23 @@ impl NetworkState {
         );
         let pong = Message {
             payload: Vec::new(),
-            command: [0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0],
+            command: *PONG_CMD,
         };
-        match command.as_ref() {
-            "ping\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+        match message.command {
+            x if x == *PING_CMD => {
                 self.streams[i]
                     .stream
                     .write(&pong.serialize())
                     .unwrap();
             }
-            "getaddr\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+            x if x == *GETADDR_CMD => {
                 let addr = Addr::msg_from_streams(&self.streams);
                 self.streams[i]
                     .stream
                     .write(&addr.serialize())
                     .unwrap();
             }
-            "addr\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+            x if x == *ADDR_CMD => {
                 let addresses = Addr::deserialize(&mut message.payload);
                 for address in &addresses {
                     // Don't add me
@@ -129,7 +137,7 @@ impl NetworkState {
                     }
                 }
             }
-            "getblocks\u{0}\u{0}\u{0}" => {
+            x if x == *GETBLOCKS_CMD => {
                 let mut last_hash = [0; 32];
                 last_hash[..].clone_from_slice(&message.payload[0..32]);
                 let mut inv: Inv = Inv {
@@ -153,14 +161,14 @@ impl NetworkState {
                 }
                 // referse for
             }
-            "inv\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+            x if x == *INV_CMD => {
                 let _inv = Inv::deserialize(&mut message.payload);
                 println!("{}: {}", self.port, "got new inv");
             }
-            "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" => {
+            x if x == *PONG_CMD => {
                 self.streams[i].ts = current_epoch();
             }
-            &_ => {
+            _ => {
                 println!(
                     "{}: No match for command {}",
                     self.port, command
@@ -240,11 +248,11 @@ pub fn start_node() {
     let last_hash = ns.blocks[ns.blocks.len() - 1].hash();
 
     println!("Broadcasting on {}", ns.port);
-    let ping = Message::from_command(PING_CMD);
-    let getaddr = Message::from_command(GETADDR_CMD);
+    let ping = Message::from_command(*PING_CMD);
+    let getaddr = Message::from_command(*GETADDR_CMD);
     let mut getblocks = Message {
         payload: last_hash.to_vec(),
-        command: GETBLOCKS_CMD,
+        command: *GETBLOCKS_CMD,
     };
 
     // mine
@@ -527,19 +535,13 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
-    use super::{Addr, Message};
-    use std::collections::HashMap;
-    use std::net;
+    use super::*;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
-    fn ascii_verify() {
-        assert_eq!(
-            String::from_utf8_lossy(&[
-                0x70, 0x6f, 0x6e, 0x67, 0, 0, 0, 0, 0, 0, 0, 0,
-            ]),
-            "pong\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}".to_string()
-        );
+    fn const_verify() {
+        println!("{:?}", *INV_CMD);
+        println!("{:?}", *PING_CMD);
     }
 
     #[test]
@@ -563,16 +565,15 @@ mod tests {
                 8080,
             ),
         };
-        let mut active_nodes: HashMap<net::SocketAddr, u64> = HashMap::new();
-        active_nodes.insert(addr.address, 0);
-        let mut msg = Addr::serialize(&active_nodes);
+        let addrs = vec![addr];
+        let mut msg = Addr::msg_from_addrs(&addrs);
         assert_eq!(
             msg.serialize(),
             Message::deserialize(&mut msg.serialize()).serialize()
         );
         assert_eq!(
             Addr::deserialize(&mut msg.payload)[0].address,
-            addr.address
+            addrs[0].address
         );
     }
 }
